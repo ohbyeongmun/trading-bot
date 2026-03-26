@@ -1,13 +1,23 @@
 """Upbit 코인 트레이딩봇 - 메인 진입점."""
 
 import sys
+import io
 from pathlib import Path
+
+# Windows 콘솔 UTF-8 출력
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 from bot.core.config import load_config
 from bot.utils.logger import setup_logger, get_logger
 
 
 def main():
+    print("=" * 50)
+    print("  Upbit 트레이딩봇 시작 중...")
+    print("=" * 50)
+    print()
+
     # 설정 로드
     config_path = "config.yaml"
     if len(sys.argv) > 1:
@@ -20,6 +30,11 @@ def main():
         print("config.example.yaml을 config.yaml로 복사하고 API 키를 입력하세요:")
         print("  cp config.example.yaml config.yaml")
         sys.exit(1)
+
+    print(f"  투자금: {config.investment_krw:,.0f}원")
+    print(f"  Dry Run: {config.dry_run}")
+    print(f"  체크 간격: {config.check_interval_seconds}초")
+    print()
 
     # 로깅 설정
     setup_logger(config.logging)

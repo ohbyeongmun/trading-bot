@@ -55,3 +55,29 @@ def calculate_volatility(df: pd.DataFrame, period: int = 7) -> float:
     recent = df.tail(period)
     daily_range = (recent["high"] - recent["low"]) / recent["close"]
     return daily_range.mean()
+
+
+def detect_market_regime(df: pd.DataFrame, period: int = 20) -> str:
+    """시장 상태 감지: 'bull', 'bear', 'sideways'.
+
+    EMA20 기울기 + 현재가 위치로 판단.
+    """
+    if len(df) < period + 5:
+        return "sideways"
+
+    ema = add_ema(df, period)
+    current_price = df.iloc[-1]["close"]
+    curr_ema = ema.iloc[-1]
+    prev_ema = ema.iloc[-5]
+
+    if pd.isna(curr_ema) or pd.isna(prev_ema):
+        return "sideways"
+
+    ema_slope = (curr_ema - prev_ema) / prev_ema
+    price_vs_ema = (current_price - curr_ema) / curr_ema
+
+    if ema_slope > 0.01 and price_vs_ema > 0.01:
+        return "bull"
+    elif ema_slope < -0.01 and price_vs_ema < -0.01:
+        return "bear"
+    return "sideways"

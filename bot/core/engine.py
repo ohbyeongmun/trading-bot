@@ -12,6 +12,7 @@ from bot.strategy.ma_crossover import MACrossoverStrategy
 from bot.strategy.momentum_mtf import MultiTimeframeMomentumStrategy
 from bot.strategy.ensemble import EnsembleStrategy
 from bot.analysis.coin_selector import CoinSelector
+from bot.analysis.indicators import detect_market_regime
 from bot.risk.risk_manager import RiskManager
 from bot.risk.position_sizer import PositionSizer
 from bot.risk.portfolio import PortfolioManager
@@ -72,6 +73,7 @@ class TradingEngine:
         # 상태
         self.target_coins: list[str] = []
         self._starting_balance = 0.0
+        self._market_regime = "sideways"
 
     def _init_strategies(self) -> dict:
         cfg = self.config
@@ -104,6 +106,7 @@ class TradingEngine:
 
     def start(self):
         """봇 시작."""
+        print("[봇] 엔진 시작 중...")
         logger.info("=" * 60)
         logger.info("트레이딩 봇 시작")
         logger.info(f"투자금: {format_krw(self.config.investment_krw)}")
@@ -112,10 +115,17 @@ class TradingEngine:
 
         # 초기 잔고 기록
         self._starting_balance = self.portfolio.get_total_balance()
+        print(f"[봇] 현재 잔고: {format_krw(self._starting_balance)}")
         logger.info(f"현재 총 잔고: {format_krw(self._starting_balance)}")
 
         # 코인 선정
+        print("[봇] 코인 선정 중... (1~2분 소요)")
         self._refresh_coins()
+        print(f"[봇] 선정 코인: {self.target_coins}")
+
+        # 시장 상태 감지
+        self._update_market_regime()
+        print(f"[봇] 시장 상태: {self._market_regime}")
 
         # 알림
         strategy_names = list(self.strategies.keys())
@@ -125,6 +135,11 @@ class TradingEngine:
 
         # 스케줄러 설정
         self._setup_scheduler()
+
+        print()
+        print(f"[봇] 자동매매 시작! ({self.config.check_interval_seconds}초 간격)")
+        print("[봇] 중지하려면 Ctrl+C")
+        print("-" * 50)
 
         # 메인 루프 실행
         try:
@@ -162,12 +177,50 @@ class TradingEngine:
                 time.sleep(0.5)
 
     def _daily_refresh(self):
-        """09:05 KST - 코인 재선정 및 리스크 리셋."""
+        """09:05 KST - 코인 재선정, 리스크 리셋, 시장 상태 감지."""
         self.risk_manager.reset_daily()
         self._starting_balance = self.portfolio.get_total_balance()
         self.risk_manager.update_peak_balance(self._starting_balance)
         self._refresh_coins()
-        logger.info(f"일일 리셋 완료 | 잔고: {format_krw(self._starting_balance)}")
+        self._update_market_regime()
+        logger.info(f"일일 리셋 완료 | 잔고: {format_krw(self._starting_balance)} | 시장: {self._market_regime}")
+
+    def _update_market_regime(self):
+        """BTC 기준 시장 상태 감지 후 전략 가중치 동적 조정."""
+        btc_df = self.client.get_ohlcv("KRW-BTC", "day", 30)
+        if btc_df is None:
+            return
+
+        self._market_regime = detect_market_regime(btc_df)
+
+        # 시장 상태별 가중치 동적 조정
+        if self._market_regime == "bull":
+            # 상승장: 추세추종 + 변동성 돌파 강화
+            weights = {
+                "volatility_breakout": 0.35,
+                "rsi_bollinger": 0.15,
+                "ma_crossover": 0.25,
+                "momentum_mtf": 0.25,
+            }
+        elif self._market_regime == "bear":
+            # 하락장: RSI+볼린저(역추세) 강화, 변동성 돌파 약화
+            weights = {
+                "volatility_breakout": 0.10,
+                "rsi_bollinger": 0.40,
+                "ma_crossover": 0.30,
+                "momentum_mtf": 0.20,
+            }
+        else:
+            # 횡보장: 기본 가중치
+            weights = {
+                "volatility_breakout": 0.25,
+                "rsi_bollinger": 0.30,
+                "ma_crossover": 0.25,
+                "momentum_mtf": 0.20,
+            }
+
+        self.ensemble = EnsembleStrategy(list(self.strategies.values()), weights)
+        logger.info(f"시장 상태: {self._market_regime} | 가중치 조정: {weights}")
 
     def _daily_report(self):
         """23:00 KST - 일일 리포트 생성."""
@@ -211,11 +264,18 @@ class TradingEngine:
 
     def _trading_tick(self):
         """매 간격마다 실행되는 매매 로직."""
+        now = now_kst()
+        positions = self.db.get_open_positions()
+        pos_info = ", ".join(f"{p.ticker}" for p in positions) if positions else "없음"
+        krw = self.client.get_krw_balance()
+        print(f"[{now.strftime('%H:%M:%S')}] 체크 | 잔고: {krw:,.0f}원 | 포지션: {pos_info}", flush=True)
+
         try:
             self._check_exits()
             self._check_entries()
         except Exception as e:
             logger.error(f"매매 틱 오류: {e}", exc_info=True)
+            print(f"[오류] {e}")
 
     def _check_exits(self):
         """오픈 포지션 퇴장 조건 확인."""

@@ -81,6 +81,7 @@ class OrderManager:
                              strategy, confidence, reason, fee, order_uuid)
 
         logger.info(f"매수 완료: {ticker} | {price:,.0f}원 | {volume:.8f}개 | {strategy}")
+        print(f"  >>> 매수 완료: {ticker} | {price:,.0f}원 | {amount_krw:,.0f}원 | {strategy}", flush=True)
 
         # 알림
         if self.notifier:
@@ -139,6 +140,11 @@ class OrderManager:
                              0, reason, fee, order_uuid)
 
         logger.info(f"매도 완료: {ticker} | {sell_price:,.0f}원 | {reason}")
+        pnl_display = ""
+        if position:
+            pnl_pct_val = (sell_price / position.entry_price - 1) * 100
+            pnl_display = f" | PnL: {pnl_pct_val:+.2f}%"
+        print(f"  <<< 매도 완료: {ticker} | {sell_price:,.0f}원 | {reason}{pnl_display}", flush=True)
 
         if self.notifier:
             pnl_str = ""
