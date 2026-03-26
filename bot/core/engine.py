@@ -375,25 +375,43 @@ class TradingEngine:
             if not strategy_results:
                 continue
 
+            # 개별 전략 중 강한 매수 신호가 있으면 바로 진입
+            best_individual = None
+            for name, result in strategy_results.items():
+                if result.signal == Signal.STRONG_BUY and result.confidence >= 0.6:
+                    if best_individual is None or result.confidence > best_individual[1].confidence:
+                        best_individual = (name, result)
+
             # 앙상블 평가
             ensemble_result = self.ensemble.evaluate(ticker, strategy_results)
 
+            # 앙상블 또는 개별 강한 신호로 매수 결정
+            buy_signal = None
+            buy_strategy = "ensemble"
+
             if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
+                buy_signal = ensemble_result
+            elif best_individual:
+                buy_signal = best_individual[1]
+                buy_strategy = best_individual[0]
+
+            if buy_signal:
                 # 포지션 크기 계산
-                stats = self.db.get_strategy_stats("ensemble")
+                stats = self.db.get_strategy_stats(buy_strategy)
                 amount = self.position_sizer.calculate(
-                    current_balance, ensemble_result.confidence,
+                    current_balance, buy_signal.confidence,
                     stats["win_rate"], stats["avg_win"], stats["avg_loss"]
                 )
 
                 if amount >= 5000:
                     logger.info(
-                        f"매수 신호: {ticker} | {ensemble_result.reason} | "
-                        f"신뢰도: {ensemble_result.confidence:.2f} | 금액: {format_krw(amount)}"
+                        f"매수 신호: {ticker} | {buy_signal.reason} | "
+                        f"신뢰도: {buy_signal.confidence:.2f} | 금액: {format_krw(amount)}"
                     )
+                    print(f"  [신호] {ticker} | {buy_strategy} | {buy_signal.reason}", flush=True)
                     result = self.order_manager.execute_buy(
-                        ticker, amount, "ensemble",
-                        ensemble_result.confidence, ensemble_result.reason
+                        ticker, amount, buy_strategy,
+                        buy_signal.confidence, buy_signal.reason
                     )
                     if result:
                         current_balance = self.client.get_krw_balance()
