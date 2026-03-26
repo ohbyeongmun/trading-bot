@@ -1,0 +1,146 @@
+import time
+import threading
+from typing import Optional
+
+import pyupbit
+import pandas as pd
+
+from bot.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class UpbitClient:
+    """pyupbit 래퍼: 재시도 로직, 레이트 리밋, 로깅 포함."""
+
+    # Upbit API 제한: 주문 10req/sec, 시세 30req/sec
+    MIN_REQUEST_INTERVAL = 0.05  # 50ms
+
+    def __init__(self, access_key: str, secret_key: str):
+        self._upbit = pyupbit.Upbit(access_key, secret_key)
+        self._lock = threading.Lock()
+        self._last_request_time = 0.0
+
+    def _rate_limit(self):
+        with self._lock:
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self.MIN_REQUEST_INTERVAL:
+                time.sleep(self.MIN_REQUEST_INTERVAL - elapsed)
+            self._last_request_time = time.time()
+
+    def _retry(self, func, *args, max_retries: int = 3, **kwargs):
+        for attempt in range(max_retries):
+            try:
+                self._rate_limit()
+                result = func(*args, **kwargs)
+                if result is None and attempt < max_retries - 1:
+                    logger.warning(f"API 반환값 None, 재시도 {attempt + 1}/{max_retries}")
+                    time.sleep(1 * (attempt + 1))
+                    continue
+                return result
+            except Exception as e:
+                logger.error(f"API 오류 (시도 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 * (attempt + 1))
+                else:
+                    raise
+
+    def get_krw_balance(self) -> float:
+        balance = self._retry(self._upbit.get_balance, "KRW")
+        return float(balance) if balance else 0.0
+
+    def get_balance(self, ticker: str) -> float:
+        coin = ticker.replace("KRW-", "")
+        balance = self._retry(self._upbit.get_balance, coin)
+        return float(balance) if balance else 0.0
+
+    def get_avg_buy_price(self, ticker: str) -> float:
+        coin = ticker.replace("KRW-", "")
+        price = self._retry(self._upbit.get_avg_buy_price, coin)
+        return float(price) if price else 0.0
+
+    def get_current_price(self, ticker: str) -> Optional[float]:
+        price = self._retry(pyupbit.get_current_price, ticker)
+        return float(price) if price else None
+
+    def get_current_prices(self, tickers: list[str]) -> dict[str, float]:
+        prices = self._retry(pyupbit.get_current_price, tickers)
+        if isinstance(prices, dict):
+            return {k: float(v) for k, v in prices.items() if v is not None}
+        return {}
+
+    def get_ohlcv(
+        self,
+        ticker: str,
+        interval: str = "day",
+        count: int = 200,
+        to: Optional[str] = None,
+    ) -> Optional[pd.DataFrame]:
+        df = self._retry(pyupbit.get_ohlcv, ticker, interval=interval, count=count, to=to)
+        if df is not None and not df.empty:
+            return df
+        return None
+
+    def get_ohlcv_extended(
+        self,
+        ticker: str,
+        interval: str = "day",
+        count: int = 400,
+    ) -> Optional[pd.DataFrame]:
+        """200개 이상의 캔들 데이터를 페이지네이션으로 가져오기."""
+        frames = []
+        remaining = count
+        to = None
+
+        while remaining > 0:
+            fetch_count = min(remaining, 200)
+            df = self.get_ohlcv(ticker, interval=interval, count=fetch_count, to=to)
+            if df is None or df.empty:
+                break
+            frames.append(df)
+            remaining -= len(df)
+            if len(df) < fetch_count:
+                break
+            to = str(df.index[0])
+            time.sleep(0.2)
+
+        if not frames:
+            return None
+        result = pd.concat(frames)
+        result = result[~result.index.duplicated(keep="first")]
+        return result.sort_index()
+
+    def get_orderbook(self, ticker: str) -> Optional[dict]:
+        return self._retry(pyupbit.get_orderbook, ticker)
+
+    def get_all_krw_tickers(self) -> list[str]:
+        tickers = self._retry(pyupbit.get_tickers, fiat="KRW")
+        return tickers if tickers else []
+
+    def buy_market(self, ticker: str, amount_krw: float) -> Optional[dict]:
+        if amount_krw < 5000:
+            logger.warning(f"최소 주문 금액 미달: {amount_krw:.0f}원 (최소 5,000원)")
+            return None
+        logger.info(f"시장가 매수: {ticker} | {amount_krw:,.0f}원")
+        result = self._retry(self._upbit.buy_market_order, ticker, amount_krw)
+        if result and "error" not in result:
+            logger.info(f"매수 성공: {result.get('uuid', 'N/A')}")
+        else:
+            logger.error(f"매수 실패: {result}")
+        return result
+
+    def sell_market(self, ticker: str, volume: float) -> Optional[dict]:
+        logger.info(f"시장가 매도: {ticker} | 수량: {volume}")
+        result = self._retry(self._upbit.sell_market_order, ticker, volume)
+        if result and "error" not in result:
+            logger.info(f"매도 성공: {result.get('uuid', 'N/A')}")
+        else:
+            logger.error(f"매도 실패: {result}")
+        return result
+
+    def get_order(self, uuid: str) -> Optional[dict]:
+        return self._retry(self._upbit.get_order, uuid)
+
+    def get_balances(self) -> list[dict]:
+        result = self._retry(self._upbit.get_balances)
+        return result if result else []

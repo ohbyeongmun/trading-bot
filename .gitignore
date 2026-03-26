@@ -1,0 +1,13 @@
+config.yaml
+.env
+data/trading_bot.db
+data/logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/

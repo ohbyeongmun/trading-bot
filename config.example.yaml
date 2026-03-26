@@ -1,0 +1,70 @@
+exchange:
+  access_key: "YOUR_UPBIT_ACCESS_KEY"
+  secret_key: "YOUR_UPBIT_SECRET_KEY"
+
+telegram:
+  enabled: true
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+
+investment_krw: 2000000
+check_interval_seconds: 10
+dry_run: false
+
+strategy_weights:
+  volatility_breakout: 0.35
+  rsi_bollinger: 0.25
+  ma_crossover: 0.20
+  momentum_mtf: 0.20
+
+risk:
+  max_position_pct: 0.25
+  max_portfolio_coins: 5
+  daily_loss_limit_pct: 0.03
+  max_drawdown_pct: 0.10
+  stop_loss_pct: 0.03
+  take_profit_pct: 0.05
+  trailing_stop_pct: 0.02
+  use_kelly: true
+  kelly_fraction: 0.5
+
+coin_selection:
+  market: "KRW"
+  min_volume_krw: 5000000000
+  max_coins_to_screen: 20
+  excluded_coins:
+    - "KRW-USDT"
+    - "KRW-USDC"
+
+volatility_breakout:
+  default_k: 0.5
+  use_dynamic_k: true
+  noise_filter: true
+  lookback_days: 10
+
+rsi_bollinger:
+  rsi_period: 14
+  rsi_oversold: 30
+  rsi_overbought: 70
+  bb_period: 20
+  bb_std: 2.0
+  volume_multiplier: 1.5
+
+ma_crossover:
+  fast_period: 5
+  slow_period: 20
+  volume_multiplier: 2.0
+  adx_threshold: 25
+
+momentum_mtf:
+  timeframes:
+    - "minute240"
+    - "minute60"
+    - "minute15"
+  rsi_period: 14
+
+logging:
+  level: "INFO"
+  file: "data/logs/trading_bot.log"
+  max_bytes: 10485760
+  backup_count: 5

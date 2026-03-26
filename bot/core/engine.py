@@ -1,0 +1,340 @@
+import time
+from datetime import datetime
+
+from bot.core.config import BotConfig
+from bot.core.scheduler import Scheduler
+from bot.exchange.upbit_client import UpbitClient
+from bot.exchange.order_manager import OrderManager
+from bot.strategy.base import Signal
+from bot.strategy.volatility_breakout import VolatilityBreakoutStrategy
+from bot.strategy.rsi_bollinger import RSIBollingerStrategy
+from bot.strategy.ma_crossover import MACrossoverStrategy
+from bot.strategy.momentum_mtf import MultiTimeframeMomentumStrategy
+from bot.strategy.ensemble import EnsembleStrategy
+from bot.analysis.coin_selector import CoinSelector
+from bot.risk.risk_manager import RiskManager
+from bot.risk.position_sizer import PositionSizer
+from bot.risk.portfolio import PortfolioManager
+from bot.data.database import Database
+from bot.notify.telegram import TelegramNotifier
+from bot.utils.helpers import now_kst, format_krw, format_pct
+from bot.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class TradingEngine:
+    """트레이딩 봇 핵심 엔진."""
+
+    def __init__(self, config: BotConfig):
+        self.config = config
+
+        # 거래소 클라이언트
+        self.client = UpbitClient(config.exchange.access_key, config.exchange.secret_key)
+
+        # 데이터베이스
+        self.db = Database()
+
+        # 텔레그램 알림
+        self.notifier = TelegramNotifier(
+            config.telegram.token, config.telegram.chat_id, config.telegram.enabled
+        )
+
+        # 리스크 관리
+        self.risk_manager = RiskManager(config.risk, self.db, config.investment_krw)
+        self.position_sizer = PositionSizer(config.risk)
+        self.portfolio = PortfolioManager(self.client, config.risk, self.db)
+
+        # 주문 관리
+        self.order_manager = OrderManager(
+            self.client, self.risk_manager, self.position_sizer,
+            self.db, self.notifier, config.dry_run
+        )
+
+        # 코인 선정
+        self.coin_selector = CoinSelector(self.client, config.coin_selection)
+
+        # 전략 초기화
+        self.strategies = self._init_strategies()
+        self.ensemble = EnsembleStrategy(
+            list(self.strategies.values()),
+            {
+                "volatility_breakout": config.strategy_weights.volatility_breakout,
+                "rsi_bollinger": config.strategy_weights.rsi_bollinger,
+                "ma_crossover": config.strategy_weights.ma_crossover,
+                "momentum_mtf": config.strategy_weights.momentum_mtf,
+            },
+        )
+
+        # 스케줄러
+        self.scheduler = Scheduler()
+
+        # 상태
+        self.target_coins: list[str] = []
+        self._starting_balance = 0.0
+
+    def _init_strategies(self) -> dict:
+        cfg = self.config
+        return {
+            "volatility_breakout": VolatilityBreakoutStrategy(
+                default_k=cfg.volatility_breakout.default_k,
+                use_dynamic_k=cfg.volatility_breakout.use_dynamic_k,
+                noise_filter=cfg.volatility_breakout.noise_filter,
+                lookback_days=cfg.volatility_breakout.lookback_days,
+            ),
+            "rsi_bollinger": RSIBollingerStrategy(
+                rsi_period=cfg.rsi_bollinger.rsi_period,
+                rsi_oversold=cfg.rsi_bollinger.rsi_oversold,
+                rsi_overbought=cfg.rsi_bollinger.rsi_overbought,
+                bb_period=cfg.rsi_bollinger.bb_period,
+                bb_std=cfg.rsi_bollinger.bb_std,
+                volume_multiplier=cfg.rsi_bollinger.volume_multiplier,
+            ),
+            "ma_crossover": MACrossoverStrategy(
+                fast_period=cfg.ma_crossover.fast_period,
+                slow_period=cfg.ma_crossover.slow_period,
+                volume_multiplier=cfg.ma_crossover.volume_multiplier,
+                adx_threshold=cfg.ma_crossover.adx_threshold,
+            ),
+            "momentum_mtf": MultiTimeframeMomentumStrategy(
+                timeframes=cfg.momentum_mtf.timeframes,
+                rsi_period=cfg.momentum_mtf.rsi_period,
+            ),
+        }
+
+    def start(self):
+        """봇 시작."""
+        logger.info("=" * 60)
+        logger.info("트레이딩 봇 시작")
+        logger.info(f"투자금: {format_krw(self.config.investment_krw)}")
+        logger.info(f"Dry Run: {self.config.dry_run}")
+        logger.info("=" * 60)
+
+        # 초기 잔고 기록
+        self._starting_balance = self.portfolio.get_total_balance()
+        logger.info(f"현재 총 잔고: {format_krw(self._starting_balance)}")
+
+        # 코인 선정
+        self._refresh_coins()
+
+        # 알림
+        strategy_names = list(self.strategies.keys())
+        self.notifier.send_startup_sync(
+            self._starting_balance, len(self.target_coins), strategy_names
+        )
+
+        # 스케줄러 설정
+        self._setup_scheduler()
+
+        # 메인 루프 실행
+        try:
+            self.scheduler.run_loop(self.config.check_interval_seconds)
+        except KeyboardInterrupt:
+            self.shutdown()
+
+    def shutdown(self):
+        logger.info("봇 종료 중...")
+        self.notifier.send_alert_sync("봇이 종료되었습니다.")
+        logger.info("봇 종료 완료")
+
+    def _setup_scheduler(self):
+        # 08:55 KST - 변동성 돌파 포지션 전량 매도
+        self.scheduler.add_daily_event(8, 55, self._daily_sell_all, "일일 전량 매도")
+        # 09:05 KST - 코인 재선정
+        self.scheduler.add_daily_event(9, 5, self._daily_refresh, "코인 재선정")
+        # 23:00 KST - 일일 리포트
+        self.scheduler.add_daily_event(23, 0, self._daily_report, "일일 리포트")
+        # 인터벌 콜백 - 매매 로직
+        self.scheduler.add_interval_callback(self._trading_tick, "매매 체크")
+
+    def _refresh_coins(self):
+        logger.info("코인 선정 시작...")
+        self.target_coins = self.coin_selector.get_tradeable_coins()
+        logger.info(f"선정된 코인: {self.target_coins}")
+
+    def _daily_sell_all(self):
+        """08:55 KST - 변동성 돌파 전략 포지션 전량 매도."""
+        logger.info("일일 리셋: 변동성 돌파 포지션 매도")
+        positions = self.db.get_open_positions()
+        for pos in positions:
+            if pos.strategy == "volatility_breakout":
+                self.order_manager.execute_sell(pos.ticker, "일일 리셋 매도", pos.strategy)
+                time.sleep(0.5)
+
+    def _daily_refresh(self):
+        """09:05 KST - 코인 재선정 및 리스크 리셋."""
+        self.risk_manager.reset_daily()
+        self._starting_balance = self.portfolio.get_total_balance()
+        self.risk_manager.update_peak_balance(self._starting_balance)
+        self._refresh_coins()
+        logger.info(f"일일 리셋 완료 | 잔고: {format_krw(self._starting_balance)}")
+
+    def _daily_report(self):
+        """23:00 KST - 일일 리포트 생성."""
+        current_balance = self.portfolio.get_total_balance()
+        pnl = current_balance - self._starting_balance
+        pnl_pct = (pnl / self._starting_balance * 100) if self._starting_balance > 0 else 0
+
+        trades_today = self.db.get_trades_today()
+        trades_count = len(trades_today)
+
+        # 승률 계산
+        closed_today = [t for t in trades_today if t.side == "sell"]
+        wins = 0
+        for t in closed_today:
+            pos = self.db.get_open_position_by_ticker(t.ticker)
+            if pos and pos.pnl and pos.pnl > 0:
+                wins += 1
+        win_rate = (wins / len(closed_today) * 100) if closed_today else 0
+
+        max_dd = 0.0
+        if self.risk_manager.peak_balance > 0:
+            max_dd = ((self.risk_manager.peak_balance - current_balance)
+                      / self.risk_manager.peak_balance * 100)
+            max_dd = max(max_dd, 0)
+
+        today = now_kst().date()
+        self.db.save_daily_report(
+            today, self._starting_balance, current_balance,
+            trades_count, win_rate, max_dd
+        )
+
+        self.notifier.send_daily_report_sync(
+            str(today), self._starting_balance, current_balance,
+            pnl, pnl_pct, trades_count, win_rate, max_dd
+        )
+
+        logger.info(
+            f"일일 리포트 | 수익: {format_pct(pnl_pct)} | "
+            f"잔고: {format_krw(current_balance)} | 거래: {trades_count}건"
+        )
+
+    def _trading_tick(self):
+        """매 간격마다 실행되는 매매 로직."""
+        try:
+            self._check_exits()
+            self._check_entries()
+        except Exception as e:
+            logger.error(f"매매 틱 오류: {e}", exc_info=True)
+
+    def _check_exits(self):
+        """오픈 포지션 퇴장 조건 확인."""
+        positions = self.db.get_open_positions()
+        if not positions:
+            return
+
+        tickers = [p.ticker for p in positions]
+        prices = self.client.get_current_prices(tickers)
+
+        for pos in positions:
+            current_price = prices.get(pos.ticker)
+            if not current_price:
+                continue
+
+            # 최고가 업데이트
+            self.db.update_highest_price(pos.id, current_price)
+
+            # 리스크 매니저의 퇴장 조건 확인
+            exit_reason = self.risk_manager.get_exit_reason(
+                pos.entry_price, pos.highest_price, current_price
+            )
+            if exit_reason:
+                logger.info(f"퇴장: {pos.ticker} | {exit_reason}")
+                self.order_manager.execute_sell(pos.ticker, exit_reason, pos.strategy)
+                continue
+
+            # 전략별 매도 신호 확인 (변동성 돌파 제외 - 시간 기반 퇴장)
+            if pos.strategy != "volatility_breakout":
+                strategy = self.strategies.get(pos.strategy)
+                if strategy:
+                    df = self.client.get_ohlcv(
+                        pos.ticker, strategy.get_preferred_interval(),
+                        strategy.get_required_candle_count()
+                    )
+                    if df is not None:
+                        result = strategy.analyze(pos.ticker, df)
+                        if result.signal in (Signal.SELL, Signal.STRONG_SELL):
+                            logger.info(f"전략 매도: {pos.ticker} | {result.reason}")
+                            self.order_manager.execute_sell(
+                                pos.ticker, result.reason, pos.strategy
+                            )
+
+    def _check_entries(self):
+        """코인별 진입 조건 확인."""
+        if not self.target_coins:
+            return
+
+        # 거래 가능 확인
+        current_balance = self.client.get_krw_balance()
+        can_trade, reason = self.risk_manager.can_trade(
+            self.portfolio.get_total_balance()
+        )
+        if not can_trade:
+            return
+
+        # 현재 가격 일괄 조회
+        prices = self.client.get_current_prices(self.target_coins)
+
+        for ticker in self.target_coins:
+            current_price = prices.get(ticker)
+            if not current_price:
+                continue
+
+            # 이미 포지션 있으면 스킵
+            if self.db.get_open_position_by_ticker(ticker):
+                continue
+
+            # 각 전략 분석
+            strategy_results = {}
+            for name, strategy in self.strategies.items():
+                try:
+                    df = self.client.get_ohlcv(
+                        ticker, strategy.get_preferred_interval(),
+                        strategy.get_required_candle_count()
+                    )
+                    if df is None:
+                        continue
+
+                    kwargs = {"current_price": current_price}
+
+                    # 멀티타임프레임은 추가 데이터 필요
+                    if name == "momentum_mtf":
+                        ohlcv_map = {}
+                        for tf in self.config.momentum_mtf.timeframes:
+                            tf_df = self.client.get_ohlcv(ticker, tf, 50)
+                            if tf_df is not None:
+                                ohlcv_map[tf] = tf_df
+                            time.sleep(0.1)
+                        kwargs["ohlcv_by_timeframe"] = ohlcv_map
+
+                    result = strategy.analyze(ticker, df, **kwargs)
+                    strategy_results[name] = result
+                except Exception as e:
+                    logger.debug(f"전략 분석 오류 [{name}] {ticker}: {e}")
+
+            if not strategy_results:
+                continue
+
+            # 앙상블 평가
+            ensemble_result = self.ensemble.evaluate(ticker, strategy_results)
+
+            if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
+                # 포지션 크기 계산
+                stats = self.db.get_strategy_stats("ensemble")
+                amount = self.position_sizer.calculate(
+                    current_balance, ensemble_result.confidence,
+                    stats["win_rate"], stats["avg_win"], stats["avg_loss"]
+                )
+
+                if amount >= 5000:
+                    logger.info(
+                        f"매수 신호: {ticker} | {ensemble_result.reason} | "
+                        f"신뢰도: {ensemble_result.confidence:.2f} | 금액: {format_krw(amount)}"
+                    )
+                    result = self.order_manager.execute_buy(
+                        ticker, amount, "ensemble",
+                        ensemble_result.confidence, ensemble_result.reason
+                    )
+                    if result:
+                        current_balance = self.client.get_krw_balance()
+                        time.sleep(0.5)
