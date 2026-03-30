@@ -99,10 +99,10 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         if current_price >= target_price:
             # 돌파 강도에 따라 신뢰도 계산
             breakout_pct = (current_price - target_price) / target_price
-            confidence = min(0.5 + breakout_pct * 10, 1.0)
+            confidence = min(0.4 + breakout_pct * 5, 1.0)
 
             return StrategyResult(
-                Signal.BUY if confidence < 0.8 else Signal.STRONG_BUY,
+                Signal.STRONG_BUY if confidence >= 0.6 else Signal.BUY,
                 confidence,
                 ticker,
                 f"변동성 돌파 (k={k:.1f}, 목표가={target_price:,.0f}, 현재가={current_price:,.0f})",
