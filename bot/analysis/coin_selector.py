@@ -19,8 +19,8 @@ class CoinSelector:
         """거래 가능한 코인 목록을 점수순으로 반환."""
         all_tickers = self.client.get_all_krw_tickers()
         if not all_tickers:
-            logger.error("KRW 마켓 티커를 가져올 수 없습니다 | 기본 코인 사용")
-            return self._get_default_coins()
+            logger.error("KRW 마켓 티커를 가져올 수 없습니다")
+            return []
 
         # 제외 코인 필터
         tickers = [t for t in all_tickers if t not in self.config.excluded_coins]
@@ -36,10 +36,6 @@ class CoinSelector:
                 logger.debug(f"{ticker} 스코어링 실패: {e}")
                 continue
 
-        if not scored:
-            logger.warning("코인 스코어링 실패 | 기본 코인 사용")
-            return self._get_default_coins()
-
         # 점수순 정렬
         scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -48,13 +44,7 @@ class CoinSelector:
         for t, s in scored[:self.config.max_coins_to_screen]:
             logger.debug(f"  {t}: score={s:.4f}")
 
-        return top_coins if top_coins else self._get_default_coins()
-
-    def _get_default_coins(self) -> list[str]:
-        """API 실패 시 기본 고유동성 코인."""
-        default = ["KRW-BTC", "KRW-ETH", "KRW-DOGE", "KRW-XRP"]
-        logger.warning(f"기본 코인으로 트레이딩 시작: {default}")
-        return default
+        return top_coins
 
     def _score_coin(self, ticker: str) -> float | None:
         """코인 점수 계산: 변동성 * 0.6 + 거래량 * 0.4."""

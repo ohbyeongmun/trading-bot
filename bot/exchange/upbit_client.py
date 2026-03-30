@@ -64,10 +64,22 @@ class UpbitClient:
         return float(price) if price else None
 
     def get_current_prices(self, tickers: list[str]) -> dict[str, float]:
-        prices = self._retry(pyupbit.get_current_price, tickers)
-        if isinstance(prices, dict):
-            return {k: float(v) for k, v in prices.items() if v is not None}
-        return {}
+        prices = {}
+        if not tickers:
+            return prices
+
+        # pyupbit.get_current_price에 리스트 전체를 넘기면 하나의 잘못된 코드 때문에 전체 실패함.
+        # 따라서 개별 호출로 분리하고, 실패하는 티커는 건너뜀.
+        for ticker in tickers:
+            try:
+                current_price = self.get_current_price(ticker)
+                if current_price is not None:
+                    prices[ticker] = current_price
+                else:
+                    logger.warning(f"가격 없음: {ticker}, 생략")
+            except Exception as e:
+                logger.warning(f"유효하지 않은 티커 또는 API 오류: {ticker}, 건너뜁니다 ({e})")
+        return prices
 
     def get_ohlcv(
         self,

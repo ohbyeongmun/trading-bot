@@ -395,37 +395,6 @@ class TradingEngine:
                 buy_signal = best_individual[1]
                 buy_strategy = best_individual[0]
 
-            # 추가 완화: 개별 BUY 신호 적극 수용 (신뢰도 0.3 이상)
-            if buy_signal is None:
-                fallback = None
-                for name, result in strategy_results.items():
-                    if result.signal == Signal.BUY and result.confidence >= 0.3:
-                        if fallback is None or result.confidence > fallback[1].confidence:
-                            fallback = (name, result)
-                if fallback:
-                    buy_strategy, buy_signal = fallback
-
-            if buy_signal is None:
-                logger.info(
-                    f"매수 대기 중: {ticker} | 앙상블={ensemble_result.signal.name}({ensemble_result.confidence:.2f}) "
-                    f"| 최강 개별={best_individual[0] if best_individual else '없음'}"
-                )
-                for name, result in strategy_results.items():
-                    logger.debug(
-                        f"  전략={name} signal={result.signal.name} conf={result.confidence:.2f} reason={result.reason}"
-                    )
-
-            # 최후의 수단: 아무 신호도 없으면 가장 신뢰도 높은 개별 신호 사용
-            if buy_signal is None:
-                best_any = None
-                for name, result in strategy_results.items():
-                    if result.signal in (Signal.BUY, Signal.STRONG_BUY) and result.confidence > 0.2:
-                        if best_any is None or result.confidence > best_any[1].confidence:
-                            best_any = (name, result)
-                if best_any:
-                    buy_strategy, buy_signal = best_any
-                    logger.warning(f"최후 수단 매수 발동: {buy_strategy} confidence={best_any[1].confidence:.2f}")
-
             if buy_signal:
                 # 포지션 크기 계산
                 stats = self.db.get_strategy_stats(buy_strategy)

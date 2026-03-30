@@ -60,32 +60,29 @@ class RSIBollingerStrategy(BaseStrategy):
 
         # 매수 신호: RSI 과매도 + 볼린저 하단 근접 + 거래량 확인
         is_oversold = current_rsi < self.rsi_oversold
-        near_lower_band = current_price <= current_bb_lower * 1.02
+        near_lower_band = current_price <= current_bb_lower * 1.01
         volume_surge = (current_vol_sma > 0 and
                         current_volume >= current_vol_sma * self.volume_multiplier)
 
         if is_oversold and near_lower_band:
-            confidence = 0.5
+            confidence = 0.6
             if volume_surge:
-                confidence = 0.7
+                confidence = 0.8
             if current_rsi < 20:
                 confidence = min(confidence + 0.15, 1.0)
 
             return StrategyResult(
-                Signal.STRONG_BUY if confidence >= 0.7 else Signal.BUY,
+                Signal.STRONG_BUY if confidence >= 0.8 else Signal.BUY,
                 confidence, ticker,
                 f"RSI 과매도({current_rsi:.1f}) + 볼린저 하단 터치",
                 metadata,
             )
 
         # RSI만 과매도 (약한 매수 신호)
-        if is_oversold:
-            confidence = 0.4
-            if near_lower_band:
-                confidence = 0.5
+        if is_oversold and not near_lower_band:
             return StrategyResult(
-                Signal.BUY, confidence, ticker,
-                f"RSI 과매도({current_rsi:.1f})",
+                Signal.BUY, 0.4, ticker,
+                f"RSI 과매도({current_rsi:.1f}), 볼린저 하단 미도달",
                 metadata,
             )
 

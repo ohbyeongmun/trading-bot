@@ -91,9 +91,9 @@ class MACrossoverStrategy(BaseStrategy):
         # 기존 상승 추세 유지 중 (fast > slow)
         if curr_fast > curr_slow and is_trending:
             spread = (curr_fast - curr_slow) / curr_slow
-            if spread > 0.0:
+            if spread > 0.01:
                 return StrategyResult(
-                    Signal.BUY, 0.35, ticker,
+                    Signal.BUY, 0.3, ticker,
                     f"상승 추세 유지 (스프레드={spread:.4f})",
                     metadata,
                 )
