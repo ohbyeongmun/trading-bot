@@ -415,6 +415,17 @@ class TradingEngine:
                         f"  전략={name} signal={result.signal.name} conf={result.confidence:.2f} reason={result.reason}"
                     )
 
+            # 최후의 수단: 아무 신호도 없으면 가장 신뢰도 높은 개별 신호 사용
+            if buy_signal is None:
+                best_any = None
+                for name, result in strategy_results.items():
+                    if result.signal in (Signal.BUY, Signal.STRONG_BUY) and result.confidence > 0.2:
+                        if best_any is None or result.confidence > best_any[1].confidence:
+                            best_any = (name, result)
+                if best_any:
+                    buy_strategy, buy_signal = best_any
+                    logger.warning(f"최후 수단 매수 발동: {buy_strategy} confidence={best_any[1].confidence:.2f}")
+
             if buy_signal:
                 # 포지션 크기 계산
                 stats = self.db.get_strategy_stats(buy_strategy)
