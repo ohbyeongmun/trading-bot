@@ -60,8 +60,23 @@ class UpbitClient:
         return float(price) if price else 0.0
 
     def get_current_price(self, ticker: str) -> Optional[float]:
-        price = self._retry(pyupbit.get_current_price, ticker)
-        return float(price) if price else None
+        try:
+            price = self._retry(pyupbit.get_current_price, ticker)
+            if price is not None:
+                return float(price)
+
+            # pyupbit 이상 반환(None)일 때, ohlcv에서 마지막 종가로 대체
+            df = self.get_ohlcv(ticker, interval="minute1", count=1)
+            if df is not None and not df.empty:
+                close_price = df["close"].iloc[-1]
+                logger.info(f"현재가 None 대체: {ticker} -> {close_price}")
+                return float(close_price)
+
+            logger.warning(f"현재가 수집 실패: {ticker} (None/ohlcv 없음)")
+            return None
+        except Exception as e:
+            logger.warning(f"current_price 실패 ({ticker}): {e}")
+            return None
 
     def get_current_prices(self, tickers: list[str]) -> dict[str, float]:
         prices = {}

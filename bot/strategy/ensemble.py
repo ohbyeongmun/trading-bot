@@ -4,9 +4,10 @@ from bot.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # 매수 임계값: 가중 점수가 이 값 이상이면 매수 신호
-BUY_THRESHOLD = 0.15
-STRONG_BUY_THRESHOLD = 0.5
-SELL_THRESHOLD = -0.2
+# 확실히 매수가 안될 때를 대비해 완화 조정
+BUY_THRESHOLD = 0.05
+STRONG_BUY_THRESHOLD = 0.25
+SELL_THRESHOLD = -0.05
 
 
 class EnsembleStrategy:
