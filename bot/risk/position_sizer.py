@@ -34,6 +34,11 @@ class PositionSizer:
         # 범위 제한: 0 ~ max_position_pct
         kelly = max(0.0, min(kelly, self.config.max_position_pct))
 
+        # win_rate=0.5, avg_win==avg_loss이면 kelly=0이 되므로
+        # 초기 전략에서 무리 없이 최소 매수하도록 낮은 고정값을 지원
+        if kelly <= 0.0:
+            kelly = max(self.config.max_position_pct * 0.3, 0.1)
+
         logger.debug(f"Kelly 계산: win_rate={p:.2f}, b={b:.2f}, f*={kelly:.4f}")
         return kelly
 
@@ -70,10 +75,14 @@ class PositionSizer:
 
         # Upbit 최소 주문 금액
         if 0 < amount < UPBIT_MIN_ORDER_KRW:
-            amount = 0  # 최소 미달이면 거래하지 않음
+            amount = UPBIT_MIN_ORDER_KRW
 
         # 1000원 단위 절사
         amount = math.floor(amount / 1000) * 1000
+
+        # 재확인: 최소 주문 금액 아래면 없앰
+        if amount < UPBIT_MIN_ORDER_KRW:
+            amount = 0
 
         logger.debug(f"포지션 사이즈: {amount:,.0f}원 (자본금의 {amount / capital * 100:.1f}%)")
         return amount
