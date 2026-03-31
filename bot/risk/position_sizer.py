@@ -63,8 +63,8 @@ class PositionSizer:
         else:
             fraction = self.fixed_fractional_size()
 
-        # 신뢰도에 따라 스케일링
-        fraction *= max(strategy_confidence, 0.5)
+        # 신뢰도에 따라 스케일링 (분산투자: 최소 70% 비율 보장)
+        fraction *= max(strategy_confidence, 0.7)
 
         amount = capital * fraction
 

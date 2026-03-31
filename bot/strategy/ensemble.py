@@ -6,8 +6,8 @@ logger = get_logger(__name__)
 # 매수 임계값: 가중 점수가 이 값 이상이면 매수 신호
 # 확실히 매수가 안될 때를 대비해 완화 조정
 BUY_THRESHOLD = 0.01
-STRONG_BUY_THRESHOLD = 0.15
-SELL_THRESHOLD = -0.01
+STRONG_BUY_THRESHOLD = 0.10
+SELL_THRESHOLD = -0.005  # 매도 신호 초민감 (손실 방지)
 
 
 class EnsembleStrategy:
