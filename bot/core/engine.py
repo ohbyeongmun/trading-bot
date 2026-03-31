@@ -271,18 +271,21 @@ class TradingEngine:
         print(f"[{now.strftime('%H:%M:%S')}] 체크 | 잔고: {krw:,.0f}원 | 포지션: {pos_info}", flush=True)
 
         try:
-            self._check_exits()
+            sold_any = self._check_exits()
+            if sold_any:
+                time.sleep(0.3)  # 거래소 상태 반영 대기
             self._check_entries()
         except Exception as e:
             logger.error(f"매매 틱 오류: {e}", exc_info=True)
             print(f"[오류] {e}")
 
-    def _check_exits(self):
-        """오픈 포지션 퇴장 조건 확인."""
+    def _check_exits(self) -> bool:
+        """오픈 포지션 퇴장 조건 확인. 매도 발생 시 True 반환."""
         positions = self.db.get_open_positions()
         if not positions:
-            return
+            return False
 
+        sold = False
         tickers = [p.ticker for p in positions]
         prices = self.client.get_current_prices(tickers)
 
@@ -302,18 +305,21 @@ class TradingEngine:
                 if elapsed >= 15 or change_pct >= 1.5:
                     logger.info(f"fast_breakout 청산: {pos.ticker} | elapsed={elapsed:.1f}m | change={change_pct:.2f}%")
                     self.order_manager.execute_sell(pos.ticker, "급상승 단타 청산", pos.strategy)
+                    sold = True
                     continue
 
             # 최고가 업데이트
             self.db.update_highest_price(pos.id, current_price)
 
-            # 리스크 매니저의 퇴장 조건 확인
+            # 리스크 매니저의 퇴장 조건 확인 (시간 초과 포함)
             exit_reason = self.risk_manager.get_exit_reason(
-                pos.entry_price, pos.highest_price, current_price
+                pos.entry_price, pos.highest_price, current_price,
+                entry_time=pos.entry_time, strategy=pos.strategy
             )
             if exit_reason:
                 logger.info(f"퇴장: {pos.ticker} | {exit_reason}")
                 self.order_manager.execute_sell(pos.ticker, exit_reason, pos.strategy)
+                sold = True
                 continue
 
             # 전략별 매도 신호 확인 (변동성 돌파 제외 - 시간 기반 퇴장)
@@ -331,6 +337,9 @@ class TradingEngine:
                             self.order_manager.execute_sell(
                                 pos.ticker, result.reason, pos.strategy
                             )
+                            sold = True
+
+        return sold
 
     def _check_entries(self):
         """코인별 진입 조건 확인."""
@@ -359,9 +368,9 @@ class TradingEngine:
             if not current_price:
                 continue
 
-            # 이미 포지션 있으면 스킵
-            if self.db.get_open_position_by_ticker(ticker):
-                continue
+            # 이미 포지션 있으면 스킵 - 공격적 매매를 위해 주석처리
+            # if self.db.get_open_position_by_ticker(ticker):
+            #     continue
 
             # 각 전략 분석
             strategy_results = {}
@@ -417,7 +426,7 @@ class TradingEngine:
             if not buy_signal:
                 # 최후의 수단: 약한 BUY도 트리거 (confidence >= 0.2)
                 for name, result in strategy_results.items():
-                    if result.signal == Signal.BUY and result.confidence >= 0.2:
+                    if result.signal == Signal.BUY and result.confidence >= 0.1:
                         buy_signal = result
                         buy_strategy = name
                         logger.warning(f"최후 수단 약한 BUY 트리거: {name} ({result.confidence:.2f})")
@@ -450,9 +459,6 @@ class TradingEngine:
         if not entered:
             best_candidate = None
             for ticker in self.target_coins:
-                if self.db.get_open_position_by_ticker(ticker):
-                    continue
-
                 df = self.client.get_ohlcv(ticker, "minute5", 6)
                 if df is None or len(df) < 5:
                     continue
@@ -463,8 +469,8 @@ class TradingEngine:
                 vol_now = df["volume"].iloc[-1]
                 vol_avg = df["volume"].iloc[:-1].mean()
 
-                if pct >= 0.03 and vol_avg > 0 and vol_now >= vol_avg * 2:
-                    score = pct * 100 + min(vol_now / vol_avg, 5)
+                if pct >= 0.01 and vol_avg > 0 and vol_now >= vol_avg * 1.2:  # 공격적 조건
+                    score = pct * 100 + min(vol_now / vol_avg, 3)
                     if best_candidate is None or score > best_candidate["score"]:
                         best_candidate = {
                             "ticker": ticker,
@@ -476,7 +482,7 @@ class TradingEngine:
             if best_candidate:
                 ticker = best_candidate["ticker"]
                 reason = f"급상승 단타 (5분+{best_candidate['pct']*100:.2f}%, volx{best_candidate['vol_ratio']:.1f})"
-                confidence = min(0.85, 0.4 + best_candidate["pct"] * 10)
+                confidence = min(0.8, 0.3 + best_candidate["pct"] * 8)
                 amount = self.position_sizer.calculate(
                     current_balance, confidence,
                     self.db.get_strategy_stats("fast_breakout")["win_rate"],

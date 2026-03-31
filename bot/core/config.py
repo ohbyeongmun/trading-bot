@@ -34,6 +34,7 @@ class RiskConfig(BaseModel):
     trailing_stop_pct: float = 0.02
     use_kelly: bool = True
     kelly_fraction: float = 0.5
+    max_hold_minutes: int = 30
 
 
 class CoinSelectionConfig(BaseModel):

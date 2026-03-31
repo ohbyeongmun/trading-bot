@@ -64,7 +64,7 @@ class PositionSizer:
             fraction = self.fixed_fractional_size()
 
         # 신뢰도에 따라 스케일링
-        fraction *= max(strategy_confidence, 0.3)
+        fraction *= max(strategy_confidence, 0.5)
 
         amount = capital * fraction
 

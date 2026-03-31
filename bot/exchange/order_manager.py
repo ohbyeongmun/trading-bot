@@ -38,11 +38,10 @@ class OrderManager:
             logger.info(f"매수 거부: {ticker} | {msg}")
             return None
 
-        # 이미 포지션 있는지 확인
+        # 기존 포지션 존재 시 경고만 (중복 매수 허용)
         existing = self.db.get_open_position_by_ticker(ticker)
         if existing:
-            logger.info(f"이미 포지션 보유: {ticker}")
-            return None
+            logger.info(f"기존 포지션 존재, 추가 매수 진행: {ticker}")
 
         # 잔고 재확인 후 조정
         amount_krw = min(amount_krw, krw_balance * 0.995)  # 수수료 여유분

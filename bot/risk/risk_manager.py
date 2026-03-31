@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from bot.core.config import RiskConfig
 from bot.data.database import Database
 from bot.utils.logger import get_logger
@@ -15,6 +17,7 @@ class RiskManager:
         self.peak_balance = max(initial_capital, db.get_peak_balance() or initial_capital)
         self._daily_loss = 0.0
         self._trading_paused = False
+        self._pause_time = None
 
     @property
     def is_trading_paused(self) -> bool:
@@ -38,12 +41,23 @@ class RiskManager:
     def can_trade(self, current_balance: float) -> tuple[bool, str]:
         """거래 가능 여부 확인."""
         if self._trading_paused:
-            return False, "거래 일시 중지됨"
+            # 10분 후 자동 재개
+            if self._pause_time:
+                elapsed = (datetime.utcnow() - self._pause_time).total_seconds()
+                if elapsed >= 600:
+                    self._trading_paused = False
+                    self._pause_time = None
+                    logger.info("거래 일시 중지 자동 해제 (10분 경과)")
+                else:
+                    return False, f"거래 일시 중지됨 ({600 - elapsed:.0f}초 후 재개)"
+            else:
+                return False, "거래 일시 중지됨"
 
         # 일일 손실 한도 확인
         daily_loss_pct = self._daily_loss / self.initial_capital
         if daily_loss_pct >= self.config.daily_loss_limit_pct:
             self._trading_paused = True
+            self._pause_time = datetime.utcnow()
             msg = f"일일 손실 한도 도달 ({daily_loss_pct:.2%} >= {self.config.daily_loss_limit_pct:.2%})"
             logger.warning(msg)
             return False, msg
@@ -53,6 +67,7 @@ class RiskManager:
             drawdown = (self.peak_balance - current_balance) / self.peak_balance
             if drawdown >= self.config.max_drawdown_pct:
                 self._trading_paused = True
+                self._pause_time = datetime.utcnow()
                 msg = f"최대 낙폭 도달 ({drawdown:.2%} >= {self.config.max_drawdown_pct:.2%})"
                 logger.warning(msg)
                 return False, msg
@@ -104,7 +119,8 @@ class RiskManager:
         return True, "승인"
 
     def get_exit_reason(self, entry_price: float, highest_price: float,
-                        current_price: float) -> str | None:
+                        current_price: float, entry_time=None,
+                        strategy: str = "") -> str | None:
         """퇴장 사유 반환. None이면 홀드."""
         if self.check_stop_loss(entry_price, current_price):
             loss_pct = (current_price - entry_price) / entry_price * 100
@@ -117,5 +133,16 @@ class RiskManager:
         if self.check_trailing_stop(highest_price, current_price):
             drop_pct = (highest_price - current_price) / highest_price * 100
             return f"트레일링 스탑 (고점 대비 -{drop_pct:.1f}%)"
+
+        # 시간 초과 강제 청산 (volatility_breakout, fast_breakout 제외)
+        if (entry_time and strategy not in ("volatility_breakout", "fast_breakout")):
+            now = datetime.utcnow()
+            et = entry_time
+            if et.tzinfo is not None:
+                et = et.replace(tzinfo=None)
+            elapsed_min = (now - et).total_seconds() / 60
+            if elapsed_min >= self.config.max_hold_minutes:
+                change_pct = (current_price - entry_price) / entry_price * 100
+                return f"시간 초과 청산 ({elapsed_min:.0f}분, {change_pct:+.1f}%)"
 
         return None
