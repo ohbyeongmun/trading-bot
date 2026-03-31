@@ -360,7 +360,7 @@ class TradingEngine:
         return sold
 
     def _check_entries(self):
-        """거래량+급등 감지 → 즉시 공격 매수. 조건 최소화, 최대한 많이."""
+        """떨어진 후 반등 시작하는 코인 매수. 고점 추격 금지."""
         if not self.target_coins:
             return
 
@@ -374,18 +374,19 @@ class TradingEngine:
         if current_balance < 5000:
             return
 
-        # 1분봉 스캔 - 모든 타겟 코인
+        # 1분봉 스캔
         candidates = []
         for ticker in self.target_coins:
             try:
                 df = self.client.get_ohlcv(ticker, "minute1", 15)
-                if df is None or len(df) < 6:
+                if df is None or len(df) < 10:
                     continue
 
                 price_now = df["close"].iloc[-1]
                 price_1m = df["close"].iloc[-2]
                 price_3m = df["close"].iloc[-4]
                 price_5m = df["close"].iloc[-6]
+                price_10m = df["close"].iloc[-11] if len(df) >= 11 else df["close"].iloc[0]
 
                 vol_now = df["volume"].iloc[-1]
                 vol_avg = df["volume"].iloc[-11:-1].mean() if len(df) >= 11 else df["volume"].iloc[:-1].mean()
@@ -394,9 +395,11 @@ class TradingEngine:
                 pct_1m = (price_now / price_1m - 1) if price_1m > 0 else 0
                 pct_3m = (price_now / price_3m - 1) if price_3m > 0 else 0
                 pct_5m = (price_now / price_5m - 1) if price_5m > 0 else 0
+                pct_10m = (price_now / price_10m - 1) if price_10m > 0 else 0
 
-                # 종합 점수 = 거래량 비율 + 가격 상승률
-                score = vol_ratio * 0.5 + pct_1m * 300 + pct_3m * 200 + pct_5m * 100
+                # 최근 5분 저점 대비 현재가
+                recent_low = df["low"].iloc[-6:].min()
+                bounce_from_low = (price_now / recent_low - 1) if recent_low > 0 else 0
 
                 candidates.append({
                     "ticker": ticker,
@@ -404,8 +407,9 @@ class TradingEngine:
                     "pct_1m": pct_1m,
                     "pct_3m": pct_3m,
                     "pct_5m": pct_5m,
+                    "pct_10m": pct_10m,
                     "vol_ratio": vol_ratio,
-                    "score": score,
+                    "bounce_from_low": bounce_from_low,
                 })
             except Exception as e:
                 logger.debug(f"스캔 오류 {ticker}: {e}")
@@ -414,12 +418,12 @@ class TradingEngine:
         if not candidates:
             return
 
-        # 점수 높은 순 정렬
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+        # 거래량 높은 순 정렬
+        candidates.sort(key=lambda x: x["vol_ratio"], reverse=True)
 
         bought_count = 0
         for coin in candidates:
-            if bought_count >= 5:  # 한 틱에 최대 5개
+            if bought_count >= 5:
                 break
 
             current_balance = self.client.get_krw_balance()
@@ -437,35 +441,52 @@ class TradingEngine:
             pct_1m = coin["pct_1m"]
             pct_3m = coin["pct_3m"]
             pct_5m = coin["pct_5m"]
+            pct_10m = coin["pct_10m"]
+            bounce = coin["bounce_from_low"]
 
-            # ---- 매수 조건: 아래 중 하나만 충족하면 매수 ----
+            # ============ 고점 매수 차단 ============
+            # 이미 많이 올랐으면 절대 안 삼
+            if pct_5m >= 0.02:   # 5분에 2% 이상 올랐으면 패스
+                continue
+            if pct_1m >= 0.005:  # 1분에 0.5% 급등 중이면 패스 (꼭대기)
+                continue
 
-            # 거래량 폭발 (1.5배 이상 + 가격 양수)
-            if vol_ratio >= 1.5 and pct_1m > 0:
-                confidence = min(0.9, 0.4 + vol_ratio * 0.06)
-                reason = f"거래량급증 vol x{vol_ratio:.1f}, 1분{pct_1m*100:+.2f}%"
-                self._execute_entry(ticker, "volume_surge", confidence, reason)
+            # ============ 바닥 반등 매수 ============
+
+            # 1) 딥 반등: 빠졌다가 + 1분 반등 시작 + 거래량 동반
+            if pct_5m < 0 and pct_1m > 0 and vol_ratio >= 1.3:
+                confidence = min(0.9, 0.4 + vol_ratio * 0.05 + bounce * 10)
+                reason = f"딥반등 5분{pct_5m*100:+.1f}%→1분{pct_1m*100:+.2f}% vol x{vol_ratio:.1f}"
+                self._execute_entry(ticker, "dip_bounce", confidence, reason)
                 bought_count += 1
                 continue
 
-            # 가격 급등 (1분에 0.15% 이상 상승)
-            if pct_1m >= 0.0015 and pct_3m > 0:
-                confidence = min(0.8, 0.3 + pct_1m * 30)
-                reason = f"급등감지 1분{pct_1m*100:+.2f}%, 3분{pct_3m*100:+.2f}%"
-                self._execute_entry(ticker, "momentum_surge", confidence, reason)
+            # 2) 거래량 폭발인데 가격 아직 안 올랐음 (= 곧 올라갈 자리)
+            if vol_ratio >= 2.0 and pct_3m <= 0.002:
+                confidence = min(0.85, 0.35 + vol_ratio * 0.05)
+                reason = f"거래량저점 vol x{vol_ratio:.1f}, 3분{pct_3m*100:+.2f}%"
+                self._execute_entry(ticker, "volume_dip", confidence, reason)
                 bought_count += 1
                 continue
 
-            # 연속 상승 (1분, 3분, 5분 모두 양수)
-            if pct_1m > 0 and pct_3m > 0 and pct_5m > 0 and pct_5m >= 0.002:
-                confidence = min(0.7, 0.3 + pct_5m * 15)
-                reason = f"연속상승 5분{pct_5m*100:+.2f}%, vol x{vol_ratio:.1f}"
-                self._execute_entry(ticker, "trend_ride", confidence, reason)
+            # 3) V자 반등: 3분전 하락 + 1분전 반등
+            if pct_3m < 0 and pct_1m > 0.001:
+                confidence = min(0.8, 0.3 + abs(pct_3m) * 15 + pct_1m * 20)
+                reason = f"V반등 3분{pct_3m*100:+.1f}%→1분{pct_1m*100:+.2f}%"
+                self._execute_entry(ticker, "v_recovery", confidence, reason)
+                bought_count += 1
+                continue
+
+            # 4) 10분 하락 후 바닥 반등 + 거래량
+            if pct_10m < -0.005 and pct_1m > 0 and vol_ratio >= 1.2:
+                confidence = min(0.75, 0.3 + abs(pct_10m) * 10 + vol_ratio * 0.04)
+                reason = f"바닥반등 10분{pct_10m*100:+.1f}%→반등, vol x{vol_ratio:.1f}"
+                self._execute_entry(ticker, "bottom_bounce", confidence, reason)
                 bought_count += 1
                 continue
 
         if bought_count > 0:
-            print(f"  >>> {bought_count}개 코인 매수 완료!", flush=True)
+            print(f"  >>> {bought_count}개 코인 매수!", flush=True)
 
     def _execute_entry(self, ticker: str, strategy_name: str,
                        confidence: float, reason: str):
