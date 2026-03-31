@@ -360,7 +360,7 @@ class TradingEngine:
         return sold
 
     def _check_entries(self):
-        """거래량 폭발 초기 감지 → 공격적 매수. 핵심: 올라가기 전에 타라."""
+        """거래량+급등 감지 → 즉시 공격 매수. 조건 최소화, 최대한 많이."""
         if not self.target_coins:
             return
 
@@ -374,14 +374,12 @@ class TradingEngine:
         if current_balance < 5000:
             return
 
-        # ========================================
-        # 1단계: 1분봉으로 실시간 거래량 폭발 감지 (가장 빠름)
-        # ========================================
+        # 1분봉 스캔 - 모든 타겟 코인
         candidates = []
         for ticker in self.target_coins:
             try:
-                df = self.client.get_ohlcv(ticker, "minute1", 20)
-                if df is None or len(df) < 10:
+                df = self.client.get_ohlcv(ticker, "minute1", 15)
+                if df is None or len(df) < 6:
                     continue
 
                 price_now = df["close"].iloc[-1]
@@ -389,26 +387,16 @@ class TradingEngine:
                 price_3m = df["close"].iloc[-4]
                 price_5m = df["close"].iloc[-6]
 
-                # 1분봉 거래량 vs 직전 10분 평균
                 vol_now = df["volume"].iloc[-1]
-                vol_prev = df["volume"].iloc[-2]
-                vol_avg_10 = df["volume"].iloc[-11:-1].mean()
-                vol_ratio = vol_now / vol_avg_10 if vol_avg_10 > 0 else 0
+                vol_avg = df["volume"].iloc[-11:-1].mean() if len(df) >= 11 else df["volume"].iloc[:-1].mean()
+                vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
 
-                # 최근 2봉 연속 거래량 증가 확인
-                vol_prev_ratio = vol_prev / vol_avg_10 if vol_avg_10 > 0 else 0
-                vol_surge_consecutive = vol_ratio >= 2.0 and vol_prev_ratio >= 1.3
-
-                # 가격 변동률
                 pct_1m = (price_now / price_1m - 1) if price_1m > 0 else 0
                 pct_3m = (price_now / price_3m - 1) if price_3m > 0 else 0
                 pct_5m = (price_now / price_5m - 1) if price_5m > 0 else 0
 
-                # 양봉 확인 (현재 캔들이 상승 중)
-                candle_bullish = df["close"].iloc[-1] > df["open"].iloc[-1]
-
-                # 거래량 금액 (KRW)
-                vol_krw = vol_now * price_now
+                # 종합 점수 = 거래량 비율 + 가격 상승률
+                score = vol_ratio * 0.5 + pct_1m * 300 + pct_3m * 200 + pct_5m * 100
 
                 candidates.append({
                     "ticker": ticker,
@@ -417,9 +405,7 @@ class TradingEngine:
                     "pct_3m": pct_3m,
                     "pct_5m": pct_5m,
                     "vol_ratio": vol_ratio,
-                    "vol_surge_consecutive": vol_surge_consecutive,
-                    "candle_bullish": candle_bullish,
-                    "vol_krw": vol_krw,
+                    "score": score,
                 })
             except Exception as e:
                 logger.debug(f"스캔 오류 {ticker}: {e}")
@@ -428,15 +414,12 @@ class TradingEngine:
         if not candidates:
             return
 
-        # ========================================
-        # 2단계: 매수 조건 판단 (거래량 → 가격 순)
-        # ========================================
-        # 거래량 비율 높은 순 정렬
-        candidates.sort(key=lambda x: x["vol_ratio"], reverse=True)
+        # 점수 높은 순 정렬
+        candidates.sort(key=lambda x: x["score"], reverse=True)
 
         bought_count = 0
         for coin in candidates:
-            if bought_count >= 3:  # 한 틱에 최대 3개
+            if bought_count >= 5:  # 한 틱에 최대 5개
                 break
 
             current_balance = self.client.get_krw_balance()
@@ -454,44 +437,35 @@ class TradingEngine:
             pct_1m = coin["pct_1m"]
             pct_3m = coin["pct_3m"]
             pct_5m = coin["pct_5m"]
-            bullish = coin["candle_bullish"]
-            consec = coin["vol_surge_consecutive"]
 
-            # --------------------------------------------------
-            # A등급: 거래량 3배 이상 폭발 + 양봉 + 아직 덜 올랐음
-            #   → 큰돈이 들어오는 초기, 가격이 곧 따라올 자리
-            # --------------------------------------------------
-            if vol_ratio >= 3.0 and bullish and pct_5m < 0.03:
-                confidence = min(0.9, 0.5 + vol_ratio * 0.05)
-                reason = f"A급 거래량폭발 (vol x{vol_ratio:.1f}, 5분{pct_5m*100:+.2f}%)"
-                self._execute_entry(ticker, "volume_explosion", confidence, reason)
+            # ---- 매수 조건: 아래 중 하나만 충족하면 매수 ----
+
+            # 거래량 폭발 (1.5배 이상 + 가격 양수)
+            if vol_ratio >= 1.5 and pct_1m > 0:
+                confidence = min(0.9, 0.4 + vol_ratio * 0.06)
+                reason = f"거래량급증 vol x{vol_ratio:.1f}, 1분{pct_1m*100:+.2f}%"
+                self._execute_entry(ticker, "volume_surge", confidence, reason)
                 bought_count += 1
                 continue
 
-            # --------------------------------------------------
-            # B등급: 연속 거래량 급증 + 가격 막 올라가기 시작
-            #   → 추세 시작 확인, 파도 초입
-            # --------------------------------------------------
-            if consec and pct_1m >= 0.001 and pct_3m >= 0.002 and pct_5m < 0.02:
-                confidence = min(0.8, 0.4 + vol_ratio * 0.04)
-                reason = f"B급 연속거래량 (vol x{vol_ratio:.1f}, 3분{pct_3m*100:+.2f}%)"
-                self._execute_entry(ticker, "volume_momentum", confidence, reason)
-                bought_count += 1
-                continue
-
-            # --------------------------------------------------
-            # C등급: 거래량 2배 + 확실한 상승 모멘텀
-            #   → 이미 움직이기 시작, 아직 탈 수 있음
-            # --------------------------------------------------
-            if vol_ratio >= 2.0 and pct_1m >= 0.002 and bullish and pct_5m < 0.025:
-                confidence = min(0.7, 0.35 + vol_ratio * 0.03 + pct_1m * 10)
-                reason = f"C급 모멘텀 (vol x{vol_ratio:.1f}, 1분{pct_1m*100:+.2f}%)"
+            # 가격 급등 (1분에 0.15% 이상 상승)
+            if pct_1m >= 0.0015 and pct_3m > 0:
+                confidence = min(0.8, 0.3 + pct_1m * 30)
+                reason = f"급등감지 1분{pct_1m*100:+.2f}%, 3분{pct_3m*100:+.2f}%"
                 self._execute_entry(ticker, "momentum_surge", confidence, reason)
                 bought_count += 1
                 continue
 
+            # 연속 상승 (1분, 3분, 5분 모두 양수)
+            if pct_1m > 0 and pct_3m > 0 and pct_5m > 0 and pct_5m >= 0.002:
+                confidence = min(0.7, 0.3 + pct_5m * 15)
+                reason = f"연속상승 5분{pct_5m*100:+.2f}%, vol x{vol_ratio:.1f}"
+                self._execute_entry(ticker, "trend_ride", confidence, reason)
+                bought_count += 1
+                continue
+
         if bought_count > 0:
-            logger.info(f"이번 틱 매수 {bought_count}건 완료")
+            print(f"  >>> {bought_count}개 코인 매수 완료!", flush=True)
 
     def _execute_entry(self, ticker: str, strategy_name: str,
                        confidence: float, reason: str):
