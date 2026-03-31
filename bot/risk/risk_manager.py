@@ -121,29 +121,12 @@ class RiskManager:
     def get_exit_reason(self, entry_price: float, highest_price: float,
                         current_price: float, entry_time=None,
                         strategy: str = "") -> str | None:
-        """퇴장 사유 반환. None이면 홀드."""
+        """퇴장 사유 반환. None이면 홀드.
+        참고: 주요 퇴장 로직은 engine._check_exits()에서 직접 처리.
+        여기는 최후의 안전장치 역할."""
+        # 큰 손실만 여기서 잡음 (config의 stop_loss_pct = 1.5%)
         if self.check_stop_loss(entry_price, current_price):
             loss_pct = (current_price - entry_price) / entry_price * 100
-            return f"손절 ({loss_pct:.1f}%)"
-
-        if self.check_take_profit(entry_price, current_price):
-            profit_pct = (current_price - entry_price) / entry_price * 100
-            return f"익절 ({profit_pct:.1f}%)"
-
-        if self.check_trailing_stop(highest_price, current_price):
-            drop_pct = (highest_price - current_price) / highest_price * 100
-            return f"트레일링 스탑 (고점 대비 -{drop_pct:.1f}%)"
-
-        # 시간 초과 강제 청산 (별도 청산 로직이 있는 전략 제외)
-        fast_strategies = ("volatility_breakout", "fast_breakout", "momentum_surge", "volume_spike")
-        if (entry_time and strategy not in fast_strategies):
-            now = datetime.utcnow()
-            et = entry_time
-            if et.tzinfo is not None:
-                et = et.replace(tzinfo=None)
-            elapsed_min = (now - et).total_seconds() / 60
-            if elapsed_min >= self.config.max_hold_minutes:
-                change_pct = (current_price - entry_price) / entry_price * 100
-                return f"시간 초과 청산 ({elapsed_min:.0f}분, {change_pct:+.1f}%)"
+            return f"최종 손절 ({loss_pct:.1f}%)"
 
         return None
