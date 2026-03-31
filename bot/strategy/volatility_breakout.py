@@ -73,13 +73,13 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         if current_price is None:
             current_price = df.iloc[-1]["close"]
 
-        # 노이즈 필터: 전일 노이즈 비율이 높으면 스킵
+        # 노이즈 필터: 완화 (0.55 → 0.75)
         if self.noise_filter:
             noise = calculate_noise_ratio(df)
-            if len(noise) >= 2 and noise.iloc[-2] > 0.55:
+            if len(noise) >= 2 and noise.iloc[-2] > 0.75:
                 return StrategyResult(
                     Signal.NEUTRAL, 0.0, ticker,
-                    f"노이즈 비율 높음 ({noise.iloc[-2]:.2f} > 0.55)",
+                    f"노이즈 비율 높음 ({noise.iloc[-2]:.2f} > 0.75)",
                     {"noise_ratio": noise.iloc[-2]},
                 )
 

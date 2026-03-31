@@ -31,7 +31,7 @@ class CoinSelector:
                 score = self._score_coin(ticker)
                 if score is not None:
                     scored.append((ticker, score))
-                time.sleep(0.15)  # 레이트 리밋
+                time.sleep(0.08)  # 레이트 리밋 (빠르게)
             except Exception as e:
                 logger.debug(f"{ticker} 스코어링 실패: {e}")
                 continue

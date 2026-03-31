@@ -66,34 +66,33 @@ class MACrossoverStrategy(BaseStrategy):
         volume_confirmed = (curr_vol_sma > 0 and
                             curr_volume >= curr_vol_sma * self.volume_multiplier)
 
-        # 매수: 골든크로스 + 추세 + 거래량
+        # 매수: 골든크로스 (조건 완화 - ADX/거래량 옵션)
         if golden_cross:
-            confidence = 0.4
+            confidence = 0.5  # 골든크로스 자체만으로 0.5
             if is_trending:
-                confidence += 0.25
+                confidence += 0.2
             if volume_confirmed:
-                confidence += 0.25
+                confidence += 0.2
             confidence = min(confidence, 1.0)
 
-            if confidence >= 0.65:
-                return StrategyResult(
-                    Signal.STRONG_BUY if confidence >= 0.8 else Signal.BUY,
-                    confidence, ticker,
-                    f"골든크로스 (ADX={curr_adx:.1f}, 거래량x{metadata['volume_ratio']:.1f})",
-                    metadata,
-                )
             return StrategyResult(
-                Signal.BUY, confidence, ticker,
-                f"골든크로스 (추세/거래량 미확인)",
+                Signal.STRONG_BUY if confidence >= 0.7 else Signal.BUY,
+                confidence, ticker,
+                f"골든크로스 (ADX={curr_adx:.1f}, 거래량x{metadata['volume_ratio']:.1f})",
                 metadata,
             )
 
-        # 기존 상승 추세 유지 중 (fast > slow)
-        if curr_fast > curr_slow and is_trending:
+        # 상승 추세 유지 중 (fast > slow) - 조건 완화
+        if curr_fast > curr_slow:
             spread = (curr_fast - curr_slow) / curr_slow
-            if spread > 0.01:
+            confidence = 0.3
+            if is_trending:
+                confidence = 0.4
+            if volume_confirmed:
+                confidence += 0.15
+            if spread > 0.005:  # 0.5% 스프레드 (기존 1%)
                 return StrategyResult(
-                    Signal.BUY, 0.3, ticker,
+                    Signal.BUY, confidence, ticker,
                     f"상승 추세 유지 (스프레드={spread:.4f})",
                     metadata,
                 )

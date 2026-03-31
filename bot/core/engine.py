@@ -294,17 +294,26 @@ class TradingEngine:
             if not current_price:
                 continue
 
-            # 급상승 단타 전용 청산: 5분 경과 또는 +0.8% 달성 시
-            if pos.strategy == "fast_breakout":
+            # 급상승/거래량 전략 빠른 청산: 5분 경과 또는 +0.8% 달성 시
+            if pos.strategy in ("fast_breakout", "momentum_surge", "volume_spike"):
                 now_time = datetime.utcnow()
                 entry_time = pos.entry_time
                 if entry_time.tzinfo is not None:
                     entry_time = entry_time.replace(tzinfo=None)
                 elapsed = (now_time - entry_time).total_seconds() / 60
                 change_pct = (current_price / pos.entry_price - 1) * 100
-                if elapsed >= 5 or change_pct >= 0.8:
-                    logger.info(f"fast_breakout 청산: {pos.ticker} | elapsed={elapsed:.1f}m | change={change_pct:.2f}%")
-                    self.order_manager.execute_sell(pos.ticker, "급상승 단타 청산", pos.strategy)
+                # 수익이면 즉시 익절, 시간 초과면 청산
+                if change_pct >= 0.8 or elapsed >= 5:
+                    reason = f"단타 청산 ({elapsed:.1f}분, {change_pct:+.2f}%)"
+                    logger.info(f"{pos.strategy} 청산: {pos.ticker} | {reason}")
+                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
+                    sold = True
+                    continue
+                # 손실 발생 시 즉시 손절 (-0.3%)
+                if change_pct <= -0.3:
+                    reason = f"단타 손절 ({change_pct:+.2f}%)"
+                    logger.info(f"{pos.strategy} 손절: {pos.ticker} | {reason}")
+                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                     sold = True
                     continue
 
@@ -322,8 +331,9 @@ class TradingEngine:
                 sold = True
                 continue
 
-            # 전략별 매도 신호 확인 (변동성 돌파 제외 - 시간 기반 퇴장)
-            if pos.strategy != "volatility_breakout":
+            # 전략별 매도 신호 확인 (변동성 돌파/단타 전략 제외)
+            skip_strategies = ("volatility_breakout", "momentum_surge", "volume_spike", "fast_breakout")
+            if pos.strategy not in skip_strategies:
                 strategy = self.strategies.get(pos.strategy)
                 if strategy:
                     df = self.client.get_ohlcv(
@@ -342,7 +352,7 @@ class TradingEngine:
         return sold
 
     def _check_entries(self):
-        """코인별 진입 조건 확인 - 여러 코인 동시 매수."""
+        """급상승 + 거래량 기반 공격적 매수."""
         if not self.target_coins:
             return
 
@@ -352,144 +362,62 @@ class TradingEngine:
             self.portfolio.get_total_balance()
         )
         if not can_trade:
+            logger.info(f"거래 불가: {reason}")
             return
 
-        # 현재 가격 일괄 조회
-        prices = self.client.get_current_prices(self.target_coins)
-        if not prices:
-            logger.warning(
-                f"현재가 조회 실패 또는 유효 가격 없음: target_coins={self.target_coins}"
-            )
+        if current_balance < 5000:
             return
 
-        # 매수 후보 수집 (신뢰도 높은 순 정렬 후 다중 매수)
-        buy_candidates = []
-
+        # ========================================
+        # 1단계: 전 코인 모멘텀+거래량 빠른 스캔 (API 최소화)
+        # ========================================
+        momentum_scores = []
         for ticker in self.target_coins:
-            current_price = prices.get(ticker)
-            if not current_price:
-                continue
+            try:
+                df = self.client.get_ohlcv(ticker, "minute5", 10)
+                if df is None or len(df) < 6:
+                    continue
 
-            # 각 전략 분석
-            strategy_results = {}
-            for name, strategy in self.strategies.items():
-                try:
-                    df = self.client.get_ohlcv(
-                        ticker, strategy.get_preferred_interval(),
-                        strategy.get_required_candle_count()
-                    )
-                    if df is None:
-                        continue
+                price_now = df["close"].iloc[-1]
+                price_5m = df["close"].iloc[-2]  # 5분 전
+                price_15m = df["close"].iloc[-4]  # 15분 전
+                price_25m = df["close"].iloc[-6]  # 25분 전
 
-                    kwargs = {"current_price": current_price}
+                # 모멘텀 계산 (복합)
+                pct_5m = (price_now / price_5m - 1) if price_5m > 0 else 0
+                pct_15m = (price_now / price_15m - 1) if price_15m > 0 else 0
+                pct_25m = (price_now / price_25m - 1) if price_25m > 0 else 0
 
-                    # 멀티타임프레임은 추가 데이터 필요
-                    if name == "momentum_mtf":
-                        ohlcv_map = {}
-                        for tf in self.config.momentum_mtf.timeframes:
-                            tf_df = self.client.get_ohlcv(ticker, tf, 50)
-                            if tf_df is not None:
-                                ohlcv_map[tf] = tf_df
-                            time.sleep(0.1)
-                        kwargs["ohlcv_by_timeframe"] = ohlcv_map
+                # 거래량 비율
+                vol_now = df["volume"].iloc[-1]
+                vol_avg = df["volume"].iloc[:-1].mean()
+                vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
 
-                    result = strategy.analyze(ticker, df, **kwargs)
-                    strategy_results[name] = result
-                except Exception as e:
-                    logger.debug(f"전략 분석 오류 [{name}] {ticker}: {e}")
+                # 종합 점수: 상승률 + 거래량 폭발
+                score = (pct_5m * 40 + pct_15m * 35 + pct_25m * 25) + min(vol_ratio, 5) * 0.01
 
-            if not strategy_results:
-                continue
-
-            # 개별 전략 중 강한 매수 신호
-            best_individual = None
-            for name, result in strategy_results.items():
-                if result.signal == Signal.STRONG_BUY and result.confidence >= 0.5:
-                    if best_individual is None or result.confidence > best_individual[1].confidence:
-                        best_individual = (name, result)
-
-            # 앙상블 평가
-            ensemble_result = self.ensemble.evaluate(ticker, strategy_results)
-
-            # 매수 신호 결정 (강한 신호만 - 손실 방지)
-            buy_signal = None
-            buy_strategy = "ensemble"
-
-            if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
-                buy_signal = ensemble_result
-            elif best_individual:
-                buy_signal = best_individual[1]
-                buy_strategy = best_individual[0]
-
-            if buy_signal:
-                buy_candidates.append({
+                momentum_scores.append({
                     "ticker": ticker,
-                    "signal": buy_signal,
-                    "strategy": buy_strategy,
+                    "price": price_now,
+                    "pct_5m": pct_5m,
+                    "pct_15m": pct_15m,
+                    "vol_ratio": vol_ratio,
+                    "score": score,
                 })
-
-        # 신뢰도 높은 순으로 정렬 후 다중 매수
-        buy_candidates.sort(key=lambda x: x["signal"].confidence, reverse=True)
-
-        for candidate in buy_candidates:
-            # 매 매수마다 잔고/거래가능 재확인
-            current_balance = self.client.get_krw_balance()
-            if current_balance < 5000:
-                break
-
-            can_trade, reason = self.risk_manager.can_trade(
-                self.portfolio.get_total_balance()
-            )
-            if not can_trade:
-                break
-
-            ticker = candidate["ticker"]
-            buy_signal = candidate["signal"]
-            buy_strategy = candidate["strategy"]
-
-            stats = self.db.get_strategy_stats(buy_strategy)
-            amount = self.position_sizer.calculate(
-                current_balance, buy_signal.confidence,
-                stats["win_rate"], stats["avg_win"], stats["avg_loss"]
-            )
-
-            if amount >= 5000:
-                logger.info(
-                    f"매수 신호: {ticker} | {buy_signal.reason} | "
-                    f"신뢰도: {buy_signal.confidence:.2f} | 금액: {format_krw(amount)}"
-                )
-                print(f"  [신호] {ticker} | {buy_strategy} | {buy_signal.reason}", flush=True)
-                result = self.order_manager.execute_buy(
-                    ticker, amount, buy_strategy,
-                    buy_signal.confidence, buy_signal.reason
-                )
-                if result:
-                    time.sleep(0.3)
-
-        # 급상승 코인 단타 트리거 (fast_breakout) - 여러 개 동시 매수
-        breakout_candidates = []
-        for ticker in self.target_coins:
-            df = self.client.get_ohlcv(ticker, "minute5", 6)
-            if df is None or len(df) < 5:
+            except Exception as e:
+                logger.debug(f"모멘텀 스캔 오류 {ticker}: {e}")
                 continue
 
-            price_now = df["close"].iloc[-1]
-            price_5min = df["close"].iloc[-5]
-            pct = (price_now / price_5min - 1) if price_5min > 0 else 0
-            vol_now = df["volume"].iloc[-1]
-            vol_avg = df["volume"].iloc[:-1].mean()
+        if not momentum_scores:
+            return
 
-            if pct >= 0.01 and vol_avg > 0 and vol_now >= vol_avg * 1.2:
-                breakout_candidates.append({
-                    "ticker": ticker,
-                    "pct": pct,
-                    "vol_ratio": vol_now / vol_avg,
-                    "score": pct * 100 + min(vol_now / vol_avg, 3),
-                })
+        # 점수 높은 순 정렬
+        momentum_scores.sort(key=lambda x: x["score"], reverse=True)
 
-        # 상위 3개 급상승 코인 동시 매수
-        breakout_candidates.sort(key=lambda x: x["score"], reverse=True)
-        for candidate in breakout_candidates[:3]:
+        # ========================================
+        # 2단계: 급상승 + 거래량 폭발 코인 즉시 매수
+        # ========================================
+        for coin in momentum_scores:
             current_balance = self.client.get_krw_balance()
             if current_balance < 5000:
                 break
@@ -500,20 +428,132 @@ class TradingEngine:
             if not can_trade:
                 break
 
-            ticker = candidate["ticker"]
-            reason = f"급상승 단타 (5분+{candidate['pct']*100:.2f}%, volx{candidate['vol_ratio']:.1f})"
-            confidence = min(0.8, 0.3 + candidate["pct"] * 8)
-            amount = self.position_sizer.calculate(
-                current_balance, confidence,
-                self.db.get_strategy_stats("fast_breakout")["win_rate"],
-                self.db.get_strategy_stats("fast_breakout")["avg_win"],
-                self.db.get_strategy_stats("fast_breakout")["avg_loss"]
-            )
-            if amount >= 5000:
-                logger.warning(f"급상승 단타 매수: {ticker} | {reason} | 금액 {format_krw(amount)}")
-                result = self.order_manager.execute_buy(
-                    ticker, amount, "fast_breakout", confidence, reason
+            ticker = coin["ticker"]
+            pct_5m = coin["pct_5m"]
+            pct_15m = coin["pct_15m"]
+            vol_ratio = coin["vol_ratio"]
+
+            # 조건: 가격 상승 + 거래량 급증
+            is_surging = pct_5m >= 0.003 and pct_15m >= 0.005  # 5분 +0.3%, 15분 +0.5%
+            is_volume_boom = vol_ratio >= 1.5  # 거래량 1.5배 이상
+
+            if is_surging and is_volume_boom:
+                confidence = min(0.9, 0.4 + pct_5m * 20 + min(vol_ratio / 10, 0.3))
+                reason = f"급상승+거래량 (5분+{pct_5m*100:.2f}%, 15분+{pct_15m*100:.2f}%, vol x{vol_ratio:.1f})"
+                strategy_name = "momentum_surge"
+
+                amount = self.position_sizer.calculate(
+                    current_balance, confidence,
+                    self.db.get_strategy_stats(strategy_name)["win_rate"],
+                    self.db.get_strategy_stats(strategy_name)["avg_win"],
+                    self.db.get_strategy_stats(strategy_name)["avg_loss"]
                 )
-                if result:
-                    logger.info(f"급상승 단타 매수 완료: {ticker}")
-                    time.sleep(0.3)
+
+                if amount >= 5000:
+                    logger.info(f"급상승 매수: {ticker} | {reason} | 신뢰도: {confidence:.2f}")
+                    print(f"  [급상승] {ticker} | {reason}", flush=True)
+                    result = self.order_manager.execute_buy(
+                        ticker, amount, strategy_name, confidence, reason
+                    )
+                    if result:
+                        time.sleep(0.2)
+                    continue
+
+            # 거래량만 폭발 (가격 아직 안 올랐지만 곧 오를 가능성)
+            if vol_ratio >= 2.5 and pct_5m >= 0.001:
+                confidence = min(0.7, 0.3 + min(vol_ratio / 10, 0.3))
+                reason = f"거래량 폭발 (vol x{vol_ratio:.1f}, 5분+{pct_5m*100:.2f}%)"
+                strategy_name = "volume_spike"
+
+                amount = self.position_sizer.calculate(
+                    current_balance, confidence,
+                    self.db.get_strategy_stats(strategy_name)["win_rate"],
+                    self.db.get_strategy_stats(strategy_name)["avg_win"],
+                    self.db.get_strategy_stats(strategy_name)["avg_loss"]
+                )
+
+                if amount >= 5000:
+                    logger.info(f"거래량 매수: {ticker} | {reason} | 신뢰도: {confidence:.2f}")
+                    print(f"  [거래량] {ticker} | {reason}", flush=True)
+                    result = self.order_manager.execute_buy(
+                        ticker, amount, strategy_name, confidence, reason
+                    )
+                    if result:
+                        time.sleep(0.2)
+                    continue
+
+        # ========================================
+        # 3단계: 상위 5개 코인만 전략 분석 (빠르게)
+        # ========================================
+        top5 = [c["ticker"] for c in momentum_scores[:5]]
+        prices = {c["ticker"]: c["price"] for c in momentum_scores}
+
+        for ticker in top5:
+            current_balance = self.client.get_krw_balance()
+            if current_balance < 5000:
+                break
+
+            can_trade, _ = self.risk_manager.can_trade(
+                self.portfolio.get_total_balance()
+            )
+            if not can_trade:
+                break
+
+            current_price = prices.get(ticker, 0)
+            if not current_price:
+                continue
+
+            # 빠른 전략 분석 (momentum_mtf 제외 - 너무 느림)
+            strategy_results = {}
+            for name, strategy in self.strategies.items():
+                if name == "momentum_mtf":
+                    continue  # MTF는 API 3회 추가 호출 → 스킵
+                try:
+                    df = self.client.get_ohlcv(
+                        ticker, strategy.get_preferred_interval(),
+                        strategy.get_required_candle_count()
+                    )
+                    if df is None:
+                        continue
+                    result = strategy.analyze(ticker, df, current_price=current_price)
+                    strategy_results[name] = result
+                except Exception as e:
+                    logger.debug(f"전략 분석 오류 [{name}] {ticker}: {e}")
+
+            if not strategy_results:
+                continue
+
+            # 앙상블 또는 개별 전략 매수 신호
+            ensemble_result = self.ensemble.evaluate(ticker, strategy_results)
+
+            buy_signal = None
+            buy_strategy = "ensemble"
+
+            if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
+                buy_signal = ensemble_result
+
+            if not buy_signal:
+                for name, result in strategy_results.items():
+                    if result.signal in (Signal.BUY, Signal.STRONG_BUY) and result.confidence >= 0.3:
+                        buy_signal = result
+                        buy_strategy = name
+                        break
+
+            if buy_signal:
+                stats = self.db.get_strategy_stats(buy_strategy)
+                amount = self.position_sizer.calculate(
+                    current_balance, buy_signal.confidence,
+                    stats["win_rate"], stats["avg_win"], stats["avg_loss"]
+                )
+
+                if amount >= 5000:
+                    logger.info(
+                        f"전략 매수: {ticker} | {buy_signal.reason} | "
+                        f"신뢰도: {buy_signal.confidence:.2f} | 금액: {format_krw(amount)}"
+                    )
+                    print(f"  [전략] {ticker} | {buy_strategy} | {buy_signal.reason}", flush=True)
+                    self.order_manager.execute_buy(
+                        ticker, amount, buy_strategy,
+                        buy_signal.confidence, buy_signal.reason
+                    )
+                    time.sleep(0.2)

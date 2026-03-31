@@ -134,8 +134,9 @@ class RiskManager:
             drop_pct = (highest_price - current_price) / highest_price * 100
             return f"트레일링 스탑 (고점 대비 -{drop_pct:.1f}%)"
 
-        # 시간 초과 강제 청산 (volatility_breakout, fast_breakout 제외)
-        if (entry_time and strategy not in ("volatility_breakout", "fast_breakout")):
+        # 시간 초과 강제 청산 (별도 청산 로직이 있는 전략 제외)
+        fast_strategies = ("volatility_breakout", "fast_breakout", "momentum_surge", "volume_spike")
+        if (entry_time and strategy not in fast_strategies):
             now = datetime.utcnow()
             et = entry_time
             if et.tzinfo is not None:
