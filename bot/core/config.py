@@ -85,6 +85,7 @@ class BotConfig(BaseModel):
     investment_krw: float = 2_000_000
     check_interval_seconds: int = 10
     dry_run: bool = False
+    target_coins: list[str] = Field(default_factory=list)  # 빈 리스트면 자동 선정
     strategy_weights: StrategyWeights = Field(default_factory=StrategyWeights)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     coin_selection: CoinSelectionConfig = Field(default_factory=CoinSelectionConfig)

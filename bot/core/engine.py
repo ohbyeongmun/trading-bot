@@ -118,10 +118,14 @@ class TradingEngine:
         print(f"[봇] 현재 잔고: {format_krw(self._starting_balance)}")
         logger.info(f"현재 총 잔고: {format_krw(self._starting_balance)}")
 
-        # 코인 선정
-        print("[봇] 코인 선정 중... (1~2분 소요)")
-        self._refresh_coins()
-        print(f"[봇] 선정 코인: {self.target_coins}")
+        # 코인 선정 (config에 고정 코인이 있으면 바로 사용)
+        if self.config.target_coins:
+            self.target_coins = self.config.target_coins
+            print(f"[봇] 고정 코인: {self.target_coins}")
+        else:
+            print("[봇] 코인 선정 중... (1~2분 소요)")
+            self._refresh_coins()
+            print(f"[봇] 선정 코인: {self.target_coins}")
 
         # 시장 상태 감지
         self._update_market_regime()
@@ -177,11 +181,12 @@ class TradingEngine:
                 time.sleep(0.5)
 
     def _daily_refresh(self):
-        """09:05 KST - 코인 재선정, 리스크 리셋, 시장 상태 감지."""
+        """09:05 KST - 리스크 리셋, 시장 상태 감지."""
         self.risk_manager.reset_daily()
         self._starting_balance = self.portfolio.get_total_balance()
         self.risk_manager.update_peak_balance(self._starting_balance)
-        self._refresh_coins()
+        if not self.config.target_coins:
+            self._refresh_coins()
         self._update_market_regime()
         logger.info(f"일일 리셋 완료 | 잔고: {format_krw(self._starting_balance)} | 시장: {self._market_regime}")
 
