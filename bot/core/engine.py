@@ -285,7 +285,7 @@ class TradingEngine:
             print(f"[오류] {e}")
 
     def _check_exits(self) -> bool:
-        """오픈 포지션 퇴장 조건 - 트레일링으로 수익 극대화, 손절은 넓게."""
+        """단순 매도: +1% 익절, -2% 손절, 30분 시간초과."""
         positions = self.db.get_open_positions()
         if not positions:
             return False
@@ -300,62 +300,34 @@ class TradingEngine:
                 continue
 
             change_pct = (current_price / pos.entry_price - 1) * 100
-            highest = max(pos.highest_price or pos.entry_price, current_price)
-
-            # 최고가 업데이트 (매도 판단 전에 반드시)
             self.db.update_highest_price(pos.id, current_price)
 
-            # ========================================
-            # 1. 손절: -1.5% (잡음에 안 걸리는 넓은 손절)
-            # ========================================
-            if change_pct <= -1.5:
+            # 1. 익절: +2.5% (수수료 0.1% 빼고 순수익 +2.4%)
+            if change_pct >= 2.5:
+                reason = f"익절 ({change_pct:+.2f}%)"
+                logger.info(f"익절: {pos.ticker} | {reason}")
+                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
+                sold = True
+                print(f"  [익절] {pos.ticker} | +{change_pct:.2f}%", flush=True)
+                continue
+
+            # 2. 손절: -2% (BTC/ETH/XRP는 변동성 낮으므로 넉넉하게)
+            if change_pct <= -2.0:
                 reason = f"손절 ({change_pct:+.2f}%)"
                 logger.info(f"손절: {pos.ticker} | {reason}")
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                 sold = True
+                print(f"  [손절] {pos.ticker} | {change_pct:+.2f}%", flush=True)
                 continue
 
-            # ========================================
-            # 2. 수익 구간 트레일링 (핵심: 수익은 끝까지 먹는다)
-            # ========================================
-            if highest > pos.entry_price:
-                peak_profit_pct = (highest / pos.entry_price - 1) * 100
-                drop_from_peak_pct = (highest - current_price) / highest * 100
-
-                # 수익 +3% 이상 찍었으면: 고점 대비 -0.7% 빠지면 매도 (타이트 트레일링)
-                if peak_profit_pct >= 3.0 and drop_from_peak_pct >= 0.7:
-                    reason = f"트레일링 익절 (고점+{peak_profit_pct:.1f}%, 현재+{change_pct:.1f}%)"
-                    logger.info(f"트레일링 익절: {pos.ticker} | {reason}")
-                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                    sold = True
-                    continue
-
-                # 수익 +1% 이상 찍었으면: 고점 대비 -1% 빠지면 매도
-                if peak_profit_pct >= 1.0 and drop_from_peak_pct >= 1.0:
-                    reason = f"트레일링 매도 (고점+{peak_profit_pct:.1f}%, 현재+{change_pct:.1f}%)"
-                    logger.info(f"트레일링: {pos.ticker} | {reason}")
-                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                    sold = True
-                    continue
-
-                # 수익 +0.5% 이상인데 원금 아래로 내려가면: 본전 매도
-                if peak_profit_pct >= 0.5 and change_pct <= 0.0:
-                    reason = f"본전 청산 (고점+{peak_profit_pct:.1f}%→현재{change_pct:+.1f}%)"
-                    logger.info(f"본전 청산: {pos.ticker} | {reason}")
-                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                    sold = True
-                    continue
-
-            # ========================================
-            # 3. 시간 초과: 15분 지났는데 수익 없으면 정리
-            # ========================================
+            # 3. 시간초과: 30분 지나면 현재 수익률로 매도
             now_time = datetime.utcnow()
             entry_time = pos.entry_time
             if entry_time.tzinfo is not None:
                 entry_time = entry_time.replace(tzinfo=None)
             elapsed = (now_time - entry_time).total_seconds() / 60
 
-            if elapsed >= 15 and change_pct < 0.5:
+            if elapsed >= 30:
                 reason = f"시간초과 ({elapsed:.0f}분, {change_pct:+.2f}%)"
                 logger.info(f"시간초과: {pos.ticker} | {reason}")
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
@@ -365,7 +337,7 @@ class TradingEngine:
         return sold
 
     def _check_entries(self):
-        """떨어진 후 반등 시작하는 코인 매수. 고점 추격 금지."""
+        """5분봉 기준 저점 매수. 이미 포지션 있는 코인은 스킵."""
         if not self.target_coins:
             return
 
@@ -379,123 +351,76 @@ class TradingEngine:
         if current_balance < 5000:
             return
 
-        # 1분봉 스캔
-        candidates = []
         for ticker in self.target_coins:
-            try:
-                df = self.client.get_ohlcv(ticker, "minute1", 15)
-                if df is None or len(df) < 10:
-                    continue
-
-                price_now = df["close"].iloc[-1]
-                price_1m = df["close"].iloc[-2]
-                price_3m = df["close"].iloc[-4]
-                price_5m = df["close"].iloc[-6]
-                price_10m = df["close"].iloc[-11] if len(df) >= 11 else df["close"].iloc[0]
-
-                vol_now = df["volume"].iloc[-1]
-                vol_avg = df["volume"].iloc[-11:-1].mean() if len(df) >= 11 else df["volume"].iloc[:-1].mean()
-                vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
-
-                pct_1m = (price_now / price_1m - 1) if price_1m > 0 else 0
-                pct_3m = (price_now / price_3m - 1) if price_3m > 0 else 0
-                pct_5m = (price_now / price_5m - 1) if price_5m > 0 else 0
-                pct_10m = (price_now / price_10m - 1) if price_10m > 0 else 0
-
-                # 최근 5분 저점 대비 현재가
-                recent_low = df["low"].iloc[-6:].min()
-                bounce_from_low = (price_now / recent_low - 1) if recent_low > 0 else 0
-
-                candidates.append({
-                    "ticker": ticker,
-                    "price": price_now,
-                    "pct_1m": pct_1m,
-                    "pct_3m": pct_3m,
-                    "pct_5m": pct_5m,
-                    "pct_10m": pct_10m,
-                    "vol_ratio": vol_ratio,
-                    "bounce_from_low": bounce_from_low,
-                })
-            except Exception as e:
-                logger.debug(f"스캔 오류 {ticker}: {e}")
+            # 이미 이 코인 포지션 있으면 스킵
+            if self.db.get_open_position_by_ticker(ticker):
                 continue
-
-        if not candidates:
-            return
-
-        # 거래량 높은 순 정렬
-        candidates.sort(key=lambda x: x["vol_ratio"], reverse=True)
-
-        bought_count = 0
-        for coin in candidates:
-            if bought_count >= 5:
-                break
 
             current_balance = self.client.get_krw_balance()
             if current_balance < 5000:
                 break
 
-            can_trade, _ = self.risk_manager.can_trade(
-                self.portfolio.get_total_balance()
-            )
-            if not can_trade:
-                break
+            try:
+                # 5분봉 20개 = 최근 100분 데이터
+                df = self.client.get_ohlcv(ticker, "minute5", 20)
+                if df is None or len(df) < 15:
+                    continue
 
-            ticker = coin["ticker"]
-            vol_ratio = coin["vol_ratio"]
-            pct_1m = coin["pct_1m"]
-            pct_3m = coin["pct_3m"]
-            pct_5m = coin["pct_5m"]
-            pct_10m = coin["pct_10m"]
-            bounce = coin["bounce_from_low"]
+                price_now = df["close"].iloc[-1]
 
-            # ============ 고점 매수 차단 ============
-            # 이미 많이 올랐으면 절대 안 삼
-            if pct_5m >= 0.02:   # 5분에 2% 이상 올랐으면 패스
+                # 볼린저 밴드 계산 (20봉 기준)
+                closes = df["close"]
+                sma20 = closes.rolling(15).mean().iloc[-1]
+                std20 = closes.rolling(15).std().iloc[-1]
+                bb_lower = sma20 - 2 * std20  # 하단 밴드
+                bb_upper = sma20 + 2 * std20  # 상단 밴드
+
+                # RSI 간단 계산 (14봉)
+                delta = closes.diff()
+                gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
+                rsi = 100 - (100 / (1 + gain / loss)) if loss > 0 else 50
+
+                # 최근 변동 확인
+                pct_5m = (price_now / df["close"].iloc[-2] - 1) if df["close"].iloc[-2] > 0 else 0
+                pct_15m = (price_now / df["close"].iloc[-4] - 1) if df["close"].iloc[-4] > 0 else 0
+
+                # ============ 매수 조건 ============
+                # 볼린저 하단 근접 (저점) + RSI 낮음
+                near_bb_lower = price_now <= bb_lower * 1.005  # 하단밴드 0.5% 이내
+                rsi_low = rsi < 40
+
+                # 조건1: 볼린저 하단 + RSI 낮음 = 확실한 저점
+                if near_bb_lower and rsi_low:
+                    reason = f"저점매수 RSI={rsi:.0f}, BB하단근접, 15분{pct_15m*100:+.1f}%"
+                    logger.info(f"저점매수: {ticker} | {reason}")
+                    print(f"  [저점] {ticker} | {reason}", flush=True)
+                    self._execute_entry(ticker, "bb_dip", 0.8, reason)
+                    continue
+
+                # 조건2: RSI 30 이하 = 과매도 (거의 확실한 반등 지점)
+                if rsi < 30:
+                    reason = f"과매도 RSI={rsi:.0f}, 15분{pct_15m*100:+.1f}%"
+                    logger.info(f"과매도매수: {ticker} | {reason}")
+                    print(f"  [과매도] {ticker} | {reason}", flush=True)
+                    self._execute_entry(ticker, "rsi_oversold", 0.85, reason)
+                    continue
+
+                # 조건3: 볼린저 하단 터치 (RSI 무관)
+                if price_now <= bb_lower:
+                    reason = f"BB하단터치, RSI={rsi:.0f}, 15분{pct_15m*100:+.1f}%"
+                    logger.info(f"BB매수: {ticker} | {reason}")
+                    print(f"  [BB하단] {ticker} | {reason}", flush=True)
+                    self._execute_entry(ticker, "bb_touch", 0.7, reason)
+                    continue
+
+            except Exception as e:
+                logger.debug(f"분석 오류 {ticker}: {e}")
                 continue
-            if pct_1m >= 0.005:  # 1분에 0.5% 급등 중이면 패스 (꼭대기)
-                continue
-
-            # ============ 바닥 반등 매수 ============
-
-            # 1) 딥 반등: 빠졌다가 + 1분 반등 시작 + 거래량 동반
-            if pct_5m < 0 and pct_1m > 0 and vol_ratio >= 1.3:
-                confidence = min(0.9, 0.4 + vol_ratio * 0.05 + bounce * 10)
-                reason = f"딥반등 5분{pct_5m*100:+.1f}%→1분{pct_1m*100:+.2f}% vol x{vol_ratio:.1f}"
-                self._execute_entry(ticker, "dip_bounce", confidence, reason)
-                bought_count += 1
-                continue
-
-            # 2) 거래량 폭발인데 가격 아직 안 올랐음 (= 곧 올라갈 자리)
-            if vol_ratio >= 2.0 and pct_3m <= 0.002:
-                confidence = min(0.85, 0.35 + vol_ratio * 0.05)
-                reason = f"거래량저점 vol x{vol_ratio:.1f}, 3분{pct_3m*100:+.2f}%"
-                self._execute_entry(ticker, "volume_dip", confidence, reason)
-                bought_count += 1
-                continue
-
-            # 3) V자 반등: 3분전 하락 + 1분전 반등
-            if pct_3m < 0 and pct_1m > 0.001:
-                confidence = min(0.8, 0.3 + abs(pct_3m) * 15 + pct_1m * 20)
-                reason = f"V반등 3분{pct_3m*100:+.1f}%→1분{pct_1m*100:+.2f}%"
-                self._execute_entry(ticker, "v_recovery", confidence, reason)
-                bought_count += 1
-                continue
-
-            # 4) 10분 하락 후 바닥 반등 + 거래량
-            if pct_10m < -0.005 and pct_1m > 0 and vol_ratio >= 1.2:
-                confidence = min(0.75, 0.3 + abs(pct_10m) * 10 + vol_ratio * 0.04)
-                reason = f"바닥반등 10분{pct_10m*100:+.1f}%→반등, vol x{vol_ratio:.1f}"
-                self._execute_entry(ticker, "bottom_bounce", confidence, reason)
-                bought_count += 1
-                continue
-
-        if bought_count > 0:
-            print(f"  >>> {bought_count}개 코인 매수!", flush=True)
 
     def _execute_entry(self, ticker: str, strategy_name: str,
                        confidence: float, reason: str):
-        """매수 실행 헬퍼."""
+        """매수 실행."""
         current_balance = self.client.get_krw_balance()
         stats = self.db.get_strategy_stats(strategy_name)
         amount = self.position_sizer.calculate(
@@ -504,10 +429,8 @@ class TradingEngine:
         )
 
         if amount >= 5000:
-            logger.info(f"매수: {ticker} | {reason} | 신뢰도: {confidence:.2f} | 금액: {format_krw(amount)}")
-            print(f"  [매수] {ticker} | {reason}", flush=True)
             result = self.order_manager.execute_buy(
                 ticker, amount, strategy_name, confidence, reason
             )
             if result:
-                time.sleep(0.2)
+                time.sleep(0.3)
