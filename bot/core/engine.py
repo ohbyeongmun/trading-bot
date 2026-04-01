@@ -285,7 +285,7 @@ class TradingEngine:
             print(f"[오류] {e}")
 
     def _check_exits(self) -> bool:
-        """어깨에서 팔기: 상승 모멘텀 꺾이면 매도."""
+        """매도 규칙: 절대 손해 매도 금지, 수익 3~5%에서 정리."""
         positions = self.db.get_open_positions()
         if not positions:
             return False
@@ -304,61 +304,43 @@ class TradingEngine:
             peak_pct = (highest / pos.entry_price - 1) * 100
             self.db.update_highest_price(pos.id, current_price)
 
-            # 1. 손절: -2%
-            if change_pct <= -2.0:
-                reason = f"손절 ({change_pct:+.2f}%)"
-                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                sold = True
-                print(f"  [손절] {pos.ticker} {change_pct:+.2f}%", flush=True)
+            # ★ 손해 상태면 절대 매도 안 함 - 수익 날 때까지 홀딩
+            if change_pct < 0:
                 continue
 
-            # 2. 어깨 매도: +2.5% 이상 찍은 후 고점 대비 30% 되돌림
-            #    예: +5% 찍고 +3.5%까지 빠지면 매도 (수익 확보)
-            if peak_pct >= 2.5:
+            # 1. +5% 이상 → 즉시 매도 (최대 수익 확보)
+            if change_pct >= 5.0:
+                reason = f"목표익절 +{change_pct:.2f}%"
+                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
+                sold = True
+                print(f"  [익절] {pos.ticker} +{change_pct:.2f}%", flush=True)
+                continue
+
+            # 2. +3% 이상 찍은 후 고점 대비 30% 되돌림 → 어깨 매도
+            #    예: +4% 찍고 +2.8%까지 빠지면 매도 (수익 3% 확보)
+            if peak_pct >= 3.0 and change_pct >= 0.5:
                 drop_from_peak = peak_pct - change_pct
-                if drop_from_peak >= peak_pct * 0.3:  # 고점 수익의 30% 되돌림
-                    reason = f"어깨매도 (고점+{peak_pct:.1f}%→현재+{change_pct:.1f}%)"
+                if drop_from_peak >= peak_pct * 0.3:
+                    reason = f"어깨매도 고점+{peak_pct:.1f}%→+{change_pct:.1f}%"
                     self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                     sold = True
-                    print(f"  [어깨] {pos.ticker} 고점+{peak_pct:.1f}%→+{change_pct:.1f}%", flush=True)
+                    print(f"  [어깨] {pos.ticker} +{change_pct:.1f}%", flush=True)
                     continue
-
-            # 3. 최소 익절: +2.5% 도달하면 무조건 트레일링 모드
-            #    고점 대비 -0.5% 빠지면 매도
-            if peak_pct >= 2.5 and change_pct < peak_pct - 0.5:
-                reason = f"트레일링 익절 (고점+{peak_pct:.1f}%, 현재+{change_pct:.1f}%)"
-                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                sold = True
-                print(f"  [익절] {pos.ticker} +{change_pct:.1f}%", flush=True)
-                continue
-
-            # 4. 본전 방어: +1% 찍은 후 원금 아래로 내려가면 청산
-            if peak_pct >= 1.0 and change_pct <= 0:
-                reason = f"본전방어 (고점+{peak_pct:.1f}%→{change_pct:+.1f}%)"
-                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                sold = True
-                print(f"  [본전] {pos.ticker} {change_pct:+.1f}%", flush=True)
-                continue
-
-            # 5. 시간초과: 30분 지나면 정리
-            now_time = datetime.utcnow()
-            entry_time = pos.entry_time
-            if entry_time.tzinfo is not None:
-                entry_time = entry_time.replace(tzinfo=None)
-            elapsed = (now_time - entry_time).total_seconds() / 60
-
-            if elapsed >= 30:
-                reason = f"시간초과 ({elapsed:.0f}분, {change_pct:+.2f}%)"
-                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                sold = True
-                continue
 
         return sold
 
     def _check_entries(self):
-        """무릎에서 사기: EMA 골든크로스 + RSI 상승 초기 감지."""
+        """항상 5개 보유 유지. 빈 자리 있으면 무릎매수로 채움."""
         if not self.target_coins:
             return
+
+        # 현재 보유 수 확인 → 5개 미만이면 매수
+        open_positions = self.db.get_open_positions()
+        open_count = len(open_positions)
+        slots = 5 - open_count
+
+        if slots <= 0:
+            return  # 이미 5개 보유 중
 
         current_balance = self.client.get_krw_balance()
         can_trade, _ = self.risk_manager.can_trade(
@@ -367,11 +349,14 @@ class TradingEngine:
         if not can_trade or current_balance < 5000:
             return
 
+        # 이미 보유 중인 종목 제외
+        held_tickers = {p.ticker for p in open_positions}
+
         # 모든 타겟 코인 분석 → 점수 매기기
         buy_list = []
 
         for ticker in self.target_coins:
-            if self.db.get_open_position_by_ticker(ticker):
+            if ticker in held_tickers:
                 continue
 
             try:
@@ -382,11 +367,11 @@ class TradingEngine:
                 closes = df["close"]
                 price_now = closes.iloc[-1]
 
-                # EMA 5, 20 계산
+                # EMA 5, 20
                 ema5 = closes.ewm(span=5).mean()
                 ema20 = closes.ewm(span=20).mean()
 
-                # RSI 계산
+                # RSI
                 delta = closes.diff()
                 gain = delta.where(delta > 0, 0).rolling(14).mean().iloc[-1]
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean().iloc[-1]
@@ -404,62 +389,55 @@ class TradingEngine:
                 bb_upper = sma + 2 * std
                 bb_position = (price_now - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
 
-                # EMA 상태
                 ema5_now = ema5.iloc[-1]
                 ema20_now = ema20.iloc[-1]
                 ema5_prev = ema5.iloc[-2]
                 ema20_prev = ema20.iloc[-2]
 
-                # 골든크로스 (방금 EMA5가 EMA20 위로)
                 golden_cross = ema5_prev <= ema20_prev and ema5_now > ema20_now
-                # EMA5 > EMA20 (상승 추세)
                 uptrend = ema5_now > ema20_now
-                # RSI 상승 중
                 rsi_rising = rsi_prev is not None and rsi > rsi_prev
 
-                # 변동률
                 pct_3m = (price_now / closes.iloc[-2] - 1) if closes.iloc[-2] > 0 else 0
                 pct_9m = (price_now / closes.iloc[-4] - 1) if closes.iloc[-4] > 0 else 0
                 pct_30m = (price_now / closes.iloc[-11] - 1) if len(closes) >= 11 and closes.iloc[-11] > 0 else 0
 
-                # ============================================
-                # 무릎 매수 조건 (상승 초기 = 무릎)
-                # ============================================
+                # 무릎 매수 점수
                 score = 0
                 reasons = []
 
-                # 골든크로스 발생! (가장 강력한 무릎 신호)
                 if golden_cross:
                     score += 40
                     reasons.append("골든크로스")
 
-                # RSI 30~50 구간에서 상승 중 (과매도 탈출 = 무릎)
-                if 30 <= rsi <= 50 and rsi_rising:
+                if 25 <= rsi <= 55 and rsi_rising:
                     score += 30
                     reasons.append(f"RSI상승({rsi:.0f})")
 
-                # 볼린저 하단~중단 사이 (저점권)
-                if bb_position < 0.4:
+                if bb_position < 0.45:
                     score += 20
-                    reasons.append(f"BB저점({bb_position:.1%})")
+                    reasons.append(f"BB저점({bb_position:.0%})")
 
-                # 상승 추세 진입 초기
-                if uptrend and pct_3m > 0 and pct_9m <= 0.01:
+                if uptrend and pct_3m > 0 and pct_9m <= 0.015:
                     score += 15
                     reasons.append("추세초기")
 
-                # RSI 과매도 탈출 (30 이하에서 올라옴)
-                if rsi_prev is not None and rsi_prev < 30 and rsi >= 30:
+                if rsi_prev is not None and rsi_prev < 35 and rsi >= 35:
                     score += 35
                     reasons.append(f"과매도탈출({rsi:.0f})")
 
-                # 고점 추격 차단: 이미 많이 올랐으면 감점
-                if pct_30m >= 0.03:  # 30분에 3% 이상 올랐으면
+                # RSI 낮으면 가산점 (저점일수록 좋음)
+                if rsi < 40:
+                    score += 10
+                    reasons.append(f"RSI저점({rsi:.0f})")
+
+                # 고점 추격 차단
+                if pct_30m >= 0.03:
                     score -= 50
-                if bb_position > 0.7:  # 볼린저 상단권이면
+                if bb_position > 0.7:
                     score -= 30
 
-                if score >= 40 and reasons:
+                if score >= 30 and reasons:
                     buy_list.append({
                         "ticker": ticker,
                         "score": score,
@@ -472,17 +450,16 @@ class TradingEngine:
                 logger.debug(f"분석 오류 {ticker}: {e}")
                 continue
 
-        # 점수 높은 순 매수
+        # 점수 높은 순 매수 (빈 슬롯만큼)
         buy_list.sort(key=lambda x: x["score"], reverse=True)
 
+        bought = 0
         for item in buy_list:
+            if bought >= slots:
+                break
+
             current_balance = self.client.get_krw_balance()
             if current_balance < 5000:
-                break
-            can_trade, _ = self.risk_manager.can_trade(
-                self.portfolio.get_total_balance()
-            )
-            if not can_trade:
                 break
 
             ticker = item["ticker"]
@@ -490,8 +467,9 @@ class TradingEngine:
             confidence = min(0.9, 0.4 + item["score"] / 100)
 
             logger.info(f"무릎매수: {ticker} | {reason} | 점수={item['score']}")
-            print(f"  [무릎] {ticker} | {reason}", flush=True)
+            print(f"  [매수 {open_count+bought+1}/5] {ticker} | {reason}", flush=True)
             self._execute_entry(ticker, "knee_buy", confidence, reason)
+            bought += 1
 
     def _execute_entry(self, ticker: str, strategy_name: str,
                        confidence: float, reason: str):
