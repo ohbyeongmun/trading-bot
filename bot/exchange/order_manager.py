@@ -105,6 +105,16 @@ class OrderManager:
         if not current_price:
             return None
 
+        # 매도 금액이 최소주문(5,000원) 미만이면 DB만 정리
+        sell_amount_est = volume * current_price
+        if sell_amount_est < 5000:
+            position = self.db.get_open_position_by_ticker(ticker)
+            if position:
+                self.db.close_position(position.id, current_price)
+            logger.info(f"최소주문 미달 포지션 정리: {ticker} | {sell_amount_est:,.0f}원 | {reason}")
+            print(f"  [정리] {ticker} {sell_amount_est:,.0f}원 (최소주문 미달, DB 정리)", flush=True)
+            return {"closed_db": True, "ticker": ticker, "amount": sell_amount_est}
+
         position = self.db.get_open_position_by_ticker(ticker)
 
         if self.dry_run:
@@ -158,22 +168,24 @@ class OrderManager:
 
     def execute_partial_sell(self, ticker: str, ratio: float,
                              reason: str = "", strategy: str = "") -> Optional[dict]:
-        """보유량의 일정 비율만 매도. ratio: 0.0~1.0."""
+        """보유량의 일정 비율만 매도. 남은 금액이 최소주문 미달이면 전량 매도."""
         total_volume = self.client.get_balance(ticker)
         if total_volume <= 0:
-            return None
-
-        sell_volume = total_volume * ratio
-        if sell_volume <= 0:
             return None
 
         current_price = self.client.get_current_price(ticker)
         if not current_price:
             return None
 
+        total_amount = total_volume * current_price
+        sell_volume = total_volume * ratio
         sell_amount = sell_volume * current_price
-        if sell_amount < 5000:
-            return None
+        remain_amount = total_amount - sell_amount
+
+        # 분할 후 남는 금액이 5,000원 미만이면 전량 매도로 전환
+        if remain_amount < 5000 or sell_amount < 5000:
+            logger.info(f"분할매도 → 전량매도 전환: {ticker} (남는 금액 {remain_amount:,.0f}원)")
+            return self.execute_sell(ticker, reason=f"전량전환 {reason}", strategy=strategy)
 
         if self.dry_run:
             logger.info(f"[DRY RUN] 분할매도: {ticker} | {ratio:.0%} | {sell_amount:,.0f}원 | {reason}")
