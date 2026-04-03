@@ -77,4 +77,8 @@ export const api = {
   dailyReports: (limit = 30) => fetchApi<DailyReport[]>(`/api/daily-reports?limit=${limit}`),
   botStart: () => fetchApi("/api/bot/start", { method: "POST" }),
   botStop: () => fetchApi("/api/bot/stop", { method: "POST" }),
+  ohlcv: (ticker: string, interval = "minute15", count = 100) =>
+    fetchApi<any[]>(`/api/ohlcv/${ticker}?interval=${interval}&count=${count}`),
+  tickerTrades: (ticker: string, limit = 50) =>
+    fetchApi<any[]>(`/api/trades/${ticker}?limit=${limit}`),
 };

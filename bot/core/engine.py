@@ -74,6 +74,12 @@ class TradingEngine:
         self.target_coins: list[str] = []
         self._starting_balance = 0.0
         self._market_regime = "sideways"
+        self._regime_config = {
+            "max_positions": self.config.risk.max_portfolio_coins,
+            "position_size_mult": 1.0,
+            "stop_loss_mult": 1.0,
+            "take_profit_mult": 1.0,
+        }
 
     def _init_strategies(self) -> dict:
         cfg = self.config
@@ -248,37 +254,55 @@ class TradingEngine:
         logger.info(f"일일 리셋 완료 | 잔고: {format_krw(self._starting_balance)} | 시장: {self._market_regime}")
 
     def _update_market_regime(self):
-        """BTC 기준 시장 상태 감지 후 전략 가중치 동적 조정."""
+        """BTC 기준 시장 상태 감지 후 전략 가중치 + 공격성 동적 조정."""
         btc_df = self.client.get_ohlcv("KRW-BTC", "day", 30)
         if btc_df is None:
             return
 
         self._market_regime = detect_market_regime(btc_df)
 
-        # 시장 상태별 가중치 동적 조정
+        # 시장 상태별 전략 가중치 + 포지션/리스크 파라미터 동적 조정
         if self._market_regime == "bull":
-            # 상승장: 추세추종 + 변동성 돌파 강화
+            # 상승장: 적극 매수, 넓은 익절, 추세추종 강화
             weights = {
                 "volatility_breakout": 0.35,
-                "rsi_bollinger": 0.15,
-                "ma_crossover": 0.25,
+                "rsi_bollinger": 0.10,
+                "ma_crossover": 0.30,
                 "momentum_mtf": 0.25,
             }
+            self._regime_config = {
+                "max_positions": min(self.config.risk.max_portfolio_coins + 2, 8),
+                "position_size_mult": 1.2,   # 포지션 20% 크게
+                "stop_loss_mult": 1.3,       # 손절 30% 넓게 (여유)
+                "take_profit_mult": 1.5,     # 익절 50% 넓게 (더 큰 수익 노림)
+            }
         elif self._market_regime == "bear":
-            # 하락장: RSI+볼린저(역추세) 강화, 변동성 돌파 약화
+            # 하락장: 보수적, 빠른 손절, 역추세 전략 강화
             weights = {
-                "volatility_breakout": 0.10,
-                "rsi_bollinger": 0.40,
+                "volatility_breakout": 0.05,
+                "rsi_bollinger": 0.45,
                 "ma_crossover": 0.30,
                 "momentum_mtf": 0.20,
             }
+            self._regime_config = {
+                "max_positions": max(self.config.risk.max_portfolio_coins - 2, 2),
+                "position_size_mult": 0.7,   # 포지션 30% 작게
+                "stop_loss_mult": 0.7,       # 손절 30% 좁게 (빠른 탈출)
+                "take_profit_mult": 0.8,     # 익절 20% 좁게 (욕심 줄임)
+            }
         else:
-            # 횡보장: 기본 가중치
+            # 횡보장: 스윙 트레이딩, 볼린저 밴드 강화
             weights = {
-                "volatility_breakout": 0.25,
-                "rsi_bollinger": 0.30,
+                "volatility_breakout": 0.20,
+                "rsi_bollinger": 0.35,
                 "ma_crossover": 0.25,
                 "momentum_mtf": 0.20,
+            }
+            self._regime_config = {
+                "max_positions": self.config.risk.max_portfolio_coins,
+                "position_size_mult": 1.0,
+                "stop_loss_mult": 1.0,
+                "take_profit_mult": 1.0,
             }
 
         self.ensemble = EnsembleStrategy(list(self.strategies.values()), weights)
@@ -341,8 +365,23 @@ class TradingEngine:
             logger.error(f"매매 틱 오류: {e}", exc_info=True)
             print(f"[오류] {e}")
 
+    def _get_atr_pct(self, ticker: str) -> float:
+        """코인의 ATR을 현재가 대비 비율(%)로 반환. 캐시된 OHLCV 사용."""
+        try:
+            df = self.client.get_ohlcv(ticker, "day", 20)
+            if df is None or len(df) < 14:
+                return 3.0  # 기본값
+            from bot.analysis.indicators import add_atr
+            atr = add_atr(df, 14)
+            current_price = df.iloc[-1]["close"]
+            if current_price <= 0:
+                return 3.0
+            return (atr.iloc[-1] / current_price) * 100
+        except Exception:
+            return 3.0
+
     def _check_exits(self) -> bool:
-        """매도 규칙: 5단계 우선순위 (하드스탑 → 시간스탑 → 익절 → 어깨 → 트레일링)."""
+        """매도 규칙: ATR 기반 동적 손절/익절 + 분할 매도."""
         positions = self.db.get_open_positions()
         if not positions:
             return False
@@ -361,12 +400,23 @@ class TradingEngine:
             peak_pct = (highest / pos.entry_price - 1) * 100
             self.db.update_highest_price(pos.id, current_price)
 
-            # [1] 하드 스탑: -3% 이하 즉시 손절
-            if self.risk_manager.check_stop_loss(pos.entry_price, current_price):
-                reason = f"하드스탑 {change_pct:.2f}%"
+            # ATR 기반 동적 임계값 계산
+            atr_pct = self._get_atr_pct(pos.ticker)
+            # 손절: ATR × 1.5배 (변동성 큰 코인은 넓게, 작은 코인은 좁게)
+            dynamic_stop = max(atr_pct * 1.5, 2.0)   # 최소 2%
+            dynamic_stop = min(dynamic_stop, 8.0)     # 최대 8%
+            # 익절: ATR × 2.5배
+            dynamic_take = max(atr_pct * 2.5, 3.0)   # 최소 3%
+            dynamic_take = min(dynamic_take, 15.0)    # 최대 15%
+            # 분할 매도 라인: 익절의 60%
+            partial_take = dynamic_take * 0.6
+
+            # [1] 하드 스탑: ATR 기반 동적 손절
+            if change_pct <= -dynamic_stop:
+                reason = f"동적손절 {change_pct:.2f}% (ATR기반 -{dynamic_stop:.1f}%)"
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                 sold = True
-                print(f"  [손절] {pos.ticker} {change_pct:.2f}%", flush=True)
+                print(f"  [손절] {pos.ticker} {change_pct:.2f}% (한도-{dynamic_stop:.1f}%)", flush=True)
                 continue
 
             # [2] 시간 스탑: 24시간 경과 + 마이너스 → 손절
@@ -381,16 +431,25 @@ class TradingEngine:
                     print(f"  [시간] {pos.ticker} {change_pct:.2f}%", flush=True)
                     continue
 
-            # [3] 익절: +5% 이상 즉시 매도
-            if self.risk_manager.check_take_profit(pos.entry_price, current_price):
-                reason = f"목표익절 +{change_pct:.2f}%"
+            # [3] 분할 매도: 중간 익절 라인 도달 시 50% 매도
+            if change_pct >= partial_take and not getattr(pos, '_partial_sold', False):
+                reason = f"분할익절 +{change_pct:.2f}% (1차 {partial_take:.1f}%)"
+                self.order_manager.execute_partial_sell(pos.ticker, 0.5, reason, pos.strategy)
+                pos._partial_sold = True
+                sold = True
+                print(f"  [분할] {pos.ticker} +{change_pct:.2f}% (50% 매도)", flush=True)
+                continue
+
+            # [4] 최종 익절: ATR 기반 동적 익절
+            if change_pct >= dynamic_take:
+                reason = f"동적익절 +{change_pct:.2f}% (ATR기반 +{dynamic_take:.1f}%)"
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                 sold = True
                 print(f"  [익절] {pos.ticker} +{change_pct:.2f}%", flush=True)
                 continue
 
-            # [4] 어깨 매도: peak +3% 이후 30% 되돌림
-            if peak_pct >= 3.0 and change_pct >= 0.5:
+            # [5] 어깨 매도: peak 이후 30% 되돌림 (동적 기준)
+            if peak_pct >= partial_take and change_pct >= 0.5:
                 drop_from_peak = peak_pct - change_pct
                 if drop_from_peak >= peak_pct * 0.3:
                     reason = f"어깨매도 고점+{peak_pct:.1f}%→+{change_pct:.1f}%"
@@ -399,11 +458,14 @@ class TradingEngine:
                     print(f"  [어깨] {pos.ticker} +{change_pct:.1f}%", flush=True)
                     continue
 
-            # [5] 트레일링 스탑: 고점 대비 2% 하락
-            if change_pct > 0 and self.risk_manager.check_trailing_stop(highest, current_price):
-                reason = f"트레일링 고점{peak_pct:.1f}%→{change_pct:.1f}%"
-                self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
-                sold = True
+            # [6] 트레일링 스탑: 고점 대비 ATR 1배 하락
+            trailing_pct = max(atr_pct, 1.5) / 100  # 최소 1.5%
+            if change_pct > 0 and highest > 0:
+                drop_from_high = (highest - current_price) / highest
+                if drop_from_high >= trailing_pct:
+                    reason = f"트레일링 고점{peak_pct:.1f}%→{change_pct:.1f}% (ATR {atr_pct:.1f}%)"
+                    self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
+                    sold = True
                 print(f"  [트레일] {pos.ticker} +{change_pct:.1f}%", flush=True)
                 continue
 
