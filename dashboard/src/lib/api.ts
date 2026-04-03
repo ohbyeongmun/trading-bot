@@ -81,4 +81,5 @@ export const api = {
     fetchApi<any[]>(`/api/ohlcv/${ticker}?interval=${interval}&count=${count}`),
   tickerTrades: (ticker: string, limit = 50) =>
     fetchApi<any[]>(`/api/trades/${ticker}?limit=${limit}`),
+  scanner: () => fetchApi<any[]>("/api/scanner"),
 };

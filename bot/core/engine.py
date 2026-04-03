@@ -528,13 +528,47 @@ class TradingEngine:
                 # 앵상블 평가
                 ensemble_result = self.ensemble.evaluate(ticker, strategy_results)
 
+                # 거래량 급등 감지: 평소 대비 3배 이상이면 신뢰도 부스트
+                volume_boost = 0.0
+                volume_spike = False
+                try:
+                    vol_df = self.client.get_ohlcv(ticker, "minute15", 30)
+                    if vol_df is not None and len(vol_df) >= 20:
+                        from bot.analysis.indicators import add_volume_sma
+                        vol_sma = add_volume_sma(vol_df, 20)
+                        curr_vol = vol_df.iloc[-1]["volume"]
+                        avg_vol = vol_sma.iloc[-1]
+                        if avg_vol > 0:
+                            vol_ratio = curr_vol / avg_vol
+                            if vol_ratio >= 3.0:
+                                volume_boost = 0.15
+                                volume_spike = True
+                                logger.info(f"거래량 급등: {ticker} | {vol_ratio:.1f}x (부스트 +{volume_boost:.0%})")
+                            elif vol_ratio >= 2.0:
+                                volume_boost = 0.08
+                except Exception:
+                    pass
+
+                boosted_confidence = min(ensemble_result.confidence + volume_boost, 1.0)
+                spike_tag = " [VOL SPIKE]" if volume_spike else ""
+
                 if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
                     buy_candidates.append({
                         "ticker": ticker,
                         "signal": ensemble_result.signal,
-                        "confidence": ensemble_result.confidence,
-                        "reason": ensemble_result.reason,
+                        "confidence": boosted_confidence,
+                        "reason": ensemble_result.reason + spike_tag,
                         "score": ensemble_result.metadata.get("weighted_score", 0),
+                    })
+
+                # 거래량 급등이면 NEUTRAL이어도 약한 매수 후보로 포함
+                elif volume_spike and ensemble_result.signal == Signal.NEUTRAL:
+                    buy_candidates.append({
+                        "ticker": ticker,
+                        "signal": Signal.BUY,
+                        "confidence": volume_boost,
+                        "reason": f"거래량 급등 매수 (신호 NEUTRAL이나 거래량 3x+){spike_tag}",
+                        "score": 0,
                     })
 
             except Exception as e:

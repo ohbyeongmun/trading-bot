@@ -18,6 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <NavLink href="/" label="대시보드" />
             <NavLink href="/trades" label="거래 내역" />
             <NavLink href="/strategies" label="전략 분석" />
+            <NavLink href="/scanner" label="스캐너" />
           </nav>
 
           {/* Main */}
