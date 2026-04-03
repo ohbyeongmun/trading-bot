@@ -34,10 +34,9 @@ class PositionSizer:
         # 범위 제한: 0 ~ max_position_pct
         kelly = max(0.0, min(kelly, self.config.max_position_pct))
 
-        # win_rate=0.5, avg_win==avg_loss이면 kelly=0이 되므로
-        # 초기 전략에서 무리 없이 최소 매수하도록 낮은 고정값을 지원
+        # Kelly가 0 이하면 투자하지 않음 (기대수익이 음수)
         if kelly <= 0.0:
-            kelly = max(self.config.max_position_pct * 0.3, 0.1)
+            return 0.0
 
         logger.debug(f"Kelly 계산: win_rate={p:.2f}, b={b:.2f}, f*={kelly:.4f}")
         return kelly
@@ -63,8 +62,8 @@ class PositionSizer:
         else:
             fraction = self.fixed_fractional_size()
 
-        # 공격적: 최소 80% 비율 보장 (약한 신호에도 충분한 금액)
-        fraction *= max(strategy_confidence, 0.8)
+        # 신뢰도를 그대로 반영 (약한 신호 = 작은 배팅)
+        fraction *= strategy_confidence
 
         amount = capital * fraction
 

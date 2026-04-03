@@ -1,7 +1,9 @@
 config.yaml
 .env
+.env.local
 data/trading_bot.db
 data/logs/
+data/backup/
 __pycache__/
 *.pyc
 .venv/
@@ -11,3 +13,8 @@ dist/
 build/
 .idea/
 .vscode/
+
+# Node / Next.js
+node_modules/
+.next/
+out/

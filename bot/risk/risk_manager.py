@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from bot.core.config import RiskConfig
 from bot.data.database import Database
@@ -18,6 +18,8 @@ class RiskManager:
         self._daily_loss = 0.0
         self._trading_paused = False
         self._pause_time = None
+        self._balance_history: list[tuple[datetime, float]] = []
+        self._circuit_breaker_active = False
 
     @property
     def is_trading_paused(self) -> bool:
@@ -72,7 +74,44 @@ class RiskManager:
                 logger.warning(msg)
                 return False, msg
 
+        # Circuit breaker: 48시간 윈도우 내 5% 이상 낙폭 시 거래 완전 중단
+        if self._check_circuit_breaker(current_balance):
+            cb_pct = getattr(self.config, 'circuit_breaker_pct', 0.05)
+            cb_hours = getattr(self.config, 'circuit_breaker_hours', 48)
+            msg = f"Circuit breaker 발동: {cb_hours}h 내 {cb_pct:.0%} 이상 낙폭"
+            logger.critical(msg)
+            return False, msg
+
         return True, "거래 가능"
+
+    def _check_circuit_breaker(self, current_balance: float) -> bool:
+        """48시간 윈도우 내 최고 잔고 대비 낙폭이 임계값을 초과하면 True."""
+        if self._circuit_breaker_active:
+            return True
+
+        now = datetime.utcnow()
+        cb_hours = getattr(self.config, 'circuit_breaker_hours', 48)
+        cb_pct = getattr(self.config, 'circuit_breaker_pct', 0.05)
+
+        self._balance_history.append((now, current_balance))
+
+        # 윈도우 밖의 오래된 기록 제거
+        cutoff = now - timedelta(hours=cb_hours)
+        self._balance_history = [(t, b) for t, b in self._balance_history if t >= cutoff]
+
+        if not self._balance_history:
+            return False
+
+        window_peak = max(b for _, b in self._balance_history)
+        if window_peak <= 0:
+            return False
+
+        drawdown = (window_peak - current_balance) / window_peak
+        if drawdown >= cb_pct:
+            self._circuit_breaker_active = True
+            return True
+
+        return False
 
     def check_stop_loss(self, entry_price: float, current_price: float) -> bool:
         """손절 확인. True면 매도 필요."""

@@ -35,6 +35,9 @@ class RiskConfig(BaseModel):
     use_kelly: bool = True
     kelly_fraction: float = 0.5
     max_hold_minutes: int = 30
+    time_stop_hours: int = 24
+    circuit_breaker_pct: float = 0.05
+    circuit_breaker_hours: int = 48
 
 
 class CoinSelectionConfig(BaseModel):

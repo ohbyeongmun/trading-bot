@@ -10,16 +10,34 @@ from bot.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+
+# 타임프레임별 캐시 TTL (초)
+OHLCV_CACHE_TTL = {
+    "minute1": 60,
+    "minute3": 180,
+    "minute5": 300,
+    "minute15": 900,
+    "minute30": 1800,
+    "minute60": 3600,
+    "minute240": 14400,
+    "day": 86400,
+    "week": 604800,
+    "month": 2592000,
+}
+
+
 class UpbitClient:
-    """pyupbit 래퍼: 재시도 로직, 레이트 리밋, 로깅 포함."""
+    """pyupbit 래퍼: 재시도 로직, 레이트 리밋, OHLCV 캐시, 로깅 포함."""
 
     # Upbit API 제한: 주문 10req/sec, 시세 30req/sec
-    MIN_REQUEST_INTERVAL = 0.05  # 50ms
+    # 멀티 타임프레임 대응을 위해 간격 확대
+    MIN_REQUEST_INTERVAL = 0.125  # 125ms (초당 8요청)
 
     def __init__(self, access_key: str, secret_key: str):
         self._upbit = pyupbit.Upbit(access_key, secret_key)
         self._lock = threading.Lock()
         self._last_request_time = 0.0
+        self._ohlcv_cache: dict[tuple[str, str, int], dict] = {}
 
     def _rate_limit(self):
         with self._lock:
@@ -103,10 +121,28 @@ class UpbitClient:
         count: int = 200,
         to: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
+        # 캐시 확인 (to 파라미터가 없을 때만 캐시 사용)
+        if to is None:
+            cache_key = (ticker, interval, count)
+            cached = self._ohlcv_cache.get(cache_key)
+            if cached and time.time() < cached["expires_at"]:
+                return cached["data"]
+
         df = self._retry(pyupbit.get_ohlcv, ticker, interval=interval, count=count, to=to)
         if df is not None and not df.empty:
+            # 캐시 저장
+            if to is None:
+                ttl = OHLCV_CACHE_TTL.get(interval, 60)
+                self._ohlcv_cache[(ticker, interval, count)] = {
+                    "data": df,
+                    "expires_at": time.time() + ttl,
+                }
             return df
         return None
+
+    def clear_ohlcv_cache(self):
+        """캐시 수동 초기화."""
+        self._ohlcv_cache.clear()
 
     def get_ohlcv_extended(
         self,

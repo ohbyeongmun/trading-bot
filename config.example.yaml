@@ -27,6 +27,9 @@ risk:
   trailing_stop_pct: 0.02
   use_kelly: true
   kelly_fraction: 0.5
+  time_stop_hours: 24
+  circuit_breaker_pct: 0.05
+  circuit_breaker_hours: 48
 
 coin_selection:
   market: "KRW"
