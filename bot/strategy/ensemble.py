@@ -3,10 +3,9 @@ from bot.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 매수 임계값: 가중 점수가 이 값 이상이면 매수 신호
-# 선별력 있는 진입을 위해 충분히 높게 설정
-BUY_THRESHOLD = 0.15
-STRONG_BUY_THRESHOLD = 0.30
+# 매수 임계값: 적극적 매수 + 선별적 손절
+BUY_THRESHOLD = 0.05
+STRONG_BUY_THRESHOLD = 0.15
 SELL_THRESHOLD = -0.10
 
 
