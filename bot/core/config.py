@@ -25,8 +25,8 @@ class StrategyWeights(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    max_position_pct: float = 0.25
-    max_portfolio_coins: int = 5
+    max_position_pct: float = 0.20
+    max_portfolio_coins: int = 10
     daily_loss_limit_pct: float = 0.03
     max_drawdown_pct: float = 0.10
     stop_loss_pct: float = 0.03
@@ -42,8 +42,8 @@ class RiskConfig(BaseModel):
 
 class CoinSelectionConfig(BaseModel):
     market: str = "KRW"
-    min_volume_krw: float = 5_000_000_000
-    max_coins_to_screen: int = 20
+    min_volume_krw: float = 1_000_000_000  # 10억으로 낮춤 (더 많은 코인 관찰)
+    max_coins_to_screen: int = 50          # 50개로 확대
     excluded_coins: list[str] = Field(default_factory=lambda: ["KRW-USDT", "KRW-USDC"])
 
 
