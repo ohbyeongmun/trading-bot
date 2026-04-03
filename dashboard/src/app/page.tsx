@@ -7,6 +7,10 @@ import { BalanceCard } from "@/components/dashboard/BalanceCard";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { RecentTrades } from "@/components/dashboard/RecentTrades";
 import { PnlChart } from "@/components/dashboard/PnlChart";
+import { PortfolioPie } from "@/components/dashboard/PortfolioPie";
+import { WinLossChart } from "@/components/dashboard/WinLossChart";
+import { DailyActivity } from "@/components/dashboard/DailyActivity";
+import { TradeScatter } from "@/components/dashboard/TradeScatter";
 
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
@@ -20,7 +24,7 @@ export default function DashboardPage() {
       const [d, p, t, r] = await Promise.all([
         api.dashboard(),
         api.positions(),
-        api.trades(200),
+        api.trades(500),
         api.dailyReports(30),
       ]);
       setDashboard(d);
@@ -39,7 +43,6 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [fetchAll]);
 
-  // WebSocket으로 실시간 이벤트 수신 시 데이터 갱신
   const handleEvent = useCallback(() => {
     fetchAll();
   }, [fetchAll]);
@@ -83,10 +86,27 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Row 1: 자산 요약 */}
       <BalanceCard data={dashboard} />
 
-      <PnlChart reports={reports} trades={trades} />
+      {/* Row 2: 누적 손익 + 포트폴리오 + 승패 */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <PnlChart reports={reports} trades={trades} />
+        </div>
+        <div className="space-y-6">
+          <PortfolioPie positions={positions} />
+          <WinLossChart trades={trades} />
+        </div>
+      </div>
 
+      {/* Row 3: 거래 분포 + 일별 활동 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <TradeScatter trades={trades} />
+        <DailyActivity trades={trades} />
+      </div>
+
+      {/* Row 4: 포지션 + 최근 거래 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <PositionsTable positions={positions} />
         <RecentTrades trades={trades} />
