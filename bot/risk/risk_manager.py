@@ -25,7 +25,8 @@ class RiskManager:
 
     @property
     def is_trading_paused(self) -> bool:
-        return self._trading_paused
+        """새 매수만 제한되는지 여부. 매도/손절은 항상 작동."""
+        return self._trading_paused or self._circuit_breaker_active
 
     def reset_daily(self):
         """일일 리셋 (09:00 KST)."""
@@ -43,26 +44,11 @@ class RiskManager:
             self._daily_loss += abs(loss_amount)
 
     def can_trade(self, current_balance: float) -> tuple[bool, str]:
-        """거래 가능 여부 확인."""
-        if self._trading_paused:
-            # 10분 후 자동 재개
-            if self._pause_time:
-                elapsed = (datetime.utcnow() - self._pause_time).total_seconds()
-                if elapsed >= 600:
-                    self._trading_paused = False
-                    self._pause_time = None
-                    logger.info("거래 일시 중지 자동 해제 (10분 경과)")
-                else:
-                    return False, f"거래 일시 중지됨 ({600 - elapsed:.0f}초 후 재개)"
-            else:
-                return False, "거래 일시 중지됨"
-
-        # 일일 손실 한도 확인
-        daily_loss_pct = self._daily_loss / self.initial_capital
+        """새 매수 가능 여부 확인. 기존 포지션 관리(매도/손절)는 항상 가능."""
+        # 일일 손실 한도 확인 (로그만, 중단 안 함)
+        daily_loss_pct = self._daily_loss / self.initial_capital if self.initial_capital > 0 else 0
         if daily_loss_pct >= self.config.daily_loss_limit_pct:
-            self._trading_paused = True
-            self._pause_time = datetime.utcnow()
-            msg = f"일일 손실 한도 도달 ({daily_loss_pct:.2%} >= {self.config.daily_loss_limit_pct:.2%})"
+            msg = f"일일 손실 한도 근접 ({daily_loss_pct:.2%}) — 새 매수 제한"
             logger.warning(msg)
             return False, msg
 
@@ -70,9 +56,7 @@ class RiskManager:
         if self.peak_balance > 0:
             drawdown = (self.peak_balance - current_balance) / self.peak_balance
             if drawdown >= self.config.max_drawdown_pct:
-                self._trading_paused = True
-                self._pause_time = datetime.utcnow()
-                msg = f"최대 낙폭 도달 ({drawdown:.2%} >= {self.config.max_drawdown_pct:.2%})"
+                msg = f"세션 낙폭 {drawdown:.2%} — 새 매수 제한"
                 logger.warning(msg)
                 return False, msg
 

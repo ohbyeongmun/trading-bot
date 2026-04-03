@@ -3,6 +3,8 @@
 export function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
     running: "bg-green-500/20 text-green-400",
+    watching: "bg-blue-500/20 text-blue-400",
+    circuit_breaker: "bg-red-500/20 text-red-400",
     stopped: "bg-red-500/20 text-red-400",
     paused: "bg-yellow-500/20 text-yellow-400",
     bull: "bg-green-500/20 text-green-400",

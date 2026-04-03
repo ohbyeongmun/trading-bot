@@ -25,8 +25,11 @@ def get_dashboard(engine=Depends(get_engine), _: str = Depends(verify_api_key)):
 
     open_positions = len(db.get_open_positions())
 
-    if engine.risk_manager.is_trading_paused:
-        bot_status = "paused"
+    can_buy, reason = engine.risk_manager.can_trade(total_balance)
+    if engine.risk_manager._circuit_breaker_active:
+        bot_status = "circuit_breaker"
+    elif not can_buy:
+        bot_status = "watching"  # 관찰 중 (매도는 작동, 새 매수만 제한)
     else:
         bot_status = "running"
 
