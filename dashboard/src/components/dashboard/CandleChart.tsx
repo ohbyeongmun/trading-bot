@@ -10,11 +10,11 @@ interface CandleChartProps {
 export function CandleChart({ positions }: CandleChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
   const [selectedTicker, setSelectedTicker] = useState<string>("");
   const [interval, setInterval_] = useState("minute15");
   const [loading, setLoading] = useState(false);
 
-  // 보유 코인 목록
   const tickers = positions.map((p) => p.ticker);
 
   useEffect(() => {
@@ -28,18 +28,22 @@ export function CandleChart({ positions }: CandleChartProps) {
 
     let cancelled = false;
 
+    // 이전 차트 정리
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
+    if (chartRef.current) {
+      try { chartRef.current.remove(); } catch {}
+      chartRef.current = null;
+    }
+
     async function loadChart() {
       setLoading(true);
       try {
         const { createChart } = await import("lightweight-charts");
 
-        // 기존 차트 제거
-        if (chartRef.current) {
-          chartRef.current.remove();
-          chartRef.current = null;
-        }
-
-        if (!containerRef.current || cancelled) return;
+        if (cancelled || !containerRef.current) return;
 
         const chart = createChart(containerRef.current, {
           width: containerRef.current.clientWidth,
@@ -57,6 +61,12 @@ export function CandleChart({ positions }: CandleChartProps) {
             secondsVisible: false,
           },
         });
+
+        if (cancelled) {
+          try { chart.remove(); } catch {}
+          return;
+        }
+
         chartRef.current = chart;
 
         const candleSeries = chart.addCandlestickSeries({
@@ -68,39 +78,56 @@ export function CandleChart({ positions }: CandleChartProps) {
           wickUpColor: "#10b981",
         });
 
-        // OHLCV 데이터 로드
         const candles = await api.ohlcv(selectedTicker, interval, 200);
-        if (candles.length > 0 && !cancelled) {
+
+        if (cancelled) return;
+
+        if (candles.length > 0) {
           candleSeries.setData(candles);
 
-          // 거래 마커 로드
           try {
             const markers = await api.tickerTrades(selectedTicker, 30);
-            if (markers.length > 0) {
+            if (!cancelled && markers.length > 0) {
               candleSeries.setMarkers(
                 markers.filter((m: any) => m.time > 0).sort((a: any, b: any) => a.time - b.time)
               );
             }
           } catch {}
 
-          chart.timeScale().fitContent();
+          if (!cancelled) {
+            chart.timeScale().fitContent();
+          }
         }
 
         // 리사이즈 대응
-        const observer = new ResizeObserver(() => {
-          if (containerRef.current) {
-            chart.applyOptions({ width: containerRef.current.clientWidth });
-          }
-        });
-        observer.observe(containerRef.current);
+        if (!cancelled && containerRef.current) {
+          const observer = new ResizeObserver(() => {
+            if (containerRef.current && chartRef.current) {
+              try { chartRef.current.applyOptions({ width: containerRef.current.clientWidth }); } catch {}
+            }
+          });
+          observer.observe(containerRef.current);
+          observerRef.current = observer;
+        }
       } catch (e) {
-        console.error("Chart load error:", e);
+        if (!cancelled) console.error("Chart load error:", e);
       }
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     }
 
     loadChart();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+        observerRef.current = null;
+      }
+      if (chartRef.current) {
+        try { chartRef.current.remove(); } catch {}
+        chartRef.current = null;
+      }
+    };
   }, [selectedTicker, interval]);
 
   if (tickers.length === 0) {
@@ -116,7 +143,6 @@ export function CandleChart({ positions }: CandleChartProps) {
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-medium">캔들차트</h3>
         <div className="flex gap-2">
-          {/* 코인 선택 */}
           <select
             value={selectedTicker}
             onChange={(e) => setSelectedTicker(e.target.value)}
@@ -126,7 +152,6 @@ export function CandleChart({ positions }: CandleChartProps) {
               <option key={t} value={t}>{t.replace("KRW-", "")}</option>
             ))}
           </select>
-          {/* 인터벌 선택 */}
           <select
             value={interval}
             onChange={(e) => setInterval_(e.target.value)}
