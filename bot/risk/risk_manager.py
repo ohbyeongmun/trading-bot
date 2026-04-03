@@ -22,6 +22,7 @@ class RiskManager:
         self._pause_time = None
         self._balance_history: list[tuple[datetime, float]] = []
         self._circuit_breaker_active = False
+        self._cb_triggered_at: datetime | None = None
 
     @property
     def is_trading_paused(self) -> bool:
@@ -71,8 +72,16 @@ class RiskManager:
         return True, "거래 가능"
 
     def _check_circuit_breaker(self, current_balance: float) -> bool:
-        """48시간 윈도우 내 최고 잔고 대비 낙폭이 임계값을 초과하면 True."""
+        """48시간 윈도우 내 최고 잔고 대비 낙폭이 임계값을 초과하면 True.
+        1시간 후 자동 해제."""
         if self._circuit_breaker_active:
+            if self._cb_triggered_at:
+                elapsed = (datetime.utcnow() - self._cb_triggered_at).total_seconds()
+                if elapsed >= 3600:  # 1시간 후 해제
+                    self._circuit_breaker_active = False
+                    self._cb_triggered_at = None
+                    logger.info("Circuit breaker 자동 해제 (1시간 경과)")
+                    return False
             return True
 
         now = datetime.utcnow()
@@ -95,6 +104,8 @@ class RiskManager:
         drawdown = (window_peak - current_balance) / window_peak
         if drawdown >= cb_pct:
             self._circuit_breaker_active = True
+            self._cb_triggered_at = now
+            logger.critical(f"Circuit breaker 발동: 낙폭 {drawdown:.2%} (1시간 후 자동 해제)")
             return True
 
         return False
