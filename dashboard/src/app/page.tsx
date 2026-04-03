@@ -109,7 +109,7 @@ export default function DashboardPage() {
         <div className="lg:col-span-3">
           <CandleChart positions={positions} />
         </div>
-        <BotControl data={dashboard} onRefresh={fetchAll} />
+        <BotControl data={dashboard} />
       </div>
 
       {/* Row 3: 누적 손익 + 포트폴리오 + 승패 */}
