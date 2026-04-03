@@ -68,8 +68,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def check_engine_ready(request: Request, call_next):
-    """엔진 초기화 전 요청이 오면 503 반환."""
-    if request.url.path.startswith("/api/") and not hasattr(app.state, "engine"):
+    """엔진 초기화 전 요청이 오면 503 반환. OPTIONS(CORS preflight)는 통과."""
+    if (request.method != "OPTIONS"
+            and request.url.path.startswith("/api/")
+            and not hasattr(app.state, "engine")):
         return JSONResponse(
             status_code=503,
             content={"detail": "Bot engine is starting up, please wait..."},
