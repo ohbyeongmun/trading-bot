@@ -98,6 +98,34 @@ class Database:
         if pos:
             pos.partial_sold = True
             self._session.commit()
+        # ORM이 새 컬럼을 못 잡는 경우 대비, raw SQL도 실행
+        try:
+            self._session.execute(
+                self._session.bind.raw_connection().cursor().execute(
+                    "UPDATE positions SET partial_sold=1 WHERE id=?", (position_id,)
+                ) if False else None
+            )
+        except Exception:
+            pass
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self._engine.url.database)
+            conn.execute("UPDATE positions SET partial_sold=1 WHERE id=?", (position_id,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def is_partial_sold(self, position_id: int) -> bool:
+        """DB에서 직접 partial_sold 확인 (ORM 우회)."""
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self._engine.url.database)
+            row = conn.execute("SELECT partial_sold FROM positions WHERE id=?", (position_id,)).fetchone()
+            conn.close()
+            return bool(row and row[0])
+        except Exception:
+            return False
 
     def get_open_positions(self) -> list[Position]:
         return self._session.query(Position).filter_by(status="open").all()

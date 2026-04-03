@@ -437,7 +437,7 @@ class TradingEngine:
                     continue
 
             # [3] 분할 매도: +4.5%에서 50% 매도 (DB에 기록)
-            if change_pct >= 4.5 and not pos.partial_sold:
+            if change_pct >= 4.5 and not self.db.is_partial_sold(pos.id):
                 reason = f"분할익절 +{change_pct:.2f}% (4.5% 도달, 50% 매도)"
                 self.order_manager.execute_partial_sell(pos.ticker, 0.5, reason, pos.strategy)
                 self.db.mark_partial_sold(pos.id)
