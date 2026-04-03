@@ -41,7 +41,7 @@ class TradingEngine:
             config.telegram.token, config.telegram.chat_id, config.telegram.enabled
         )
 
-        # 리스크 관리
+        # 리스크 관리 (initial_capital은 start()에서 실제 잔고로 재설정)
         self.risk_manager = RiskManager(config.risk, self.db, config.investment_krw)
         self.position_sizer = PositionSizer(config.risk)
         self.portfolio = PortfolioManager(self.client, config.risk, self.db)
@@ -121,8 +121,11 @@ class TradingEngine:
         logger.info(f"Dry Run: {self.config.dry_run}")
         logger.info("=" * 60)
 
-        # 초기 잔고 기록
+        # 초기 잔고 기록 — 리스크 관리의 기준점을 실제 잔고로 설정
         self._starting_balance = self.portfolio.get_total_balance()
+        self.risk_manager.initial_capital = self._starting_balance
+        self.risk_manager.peak_balance = self._starting_balance
+        logger.info(f"리스크 기준 잔고: {format_krw(self._starting_balance)} (실제 잔고 기준)")
         print(f"[봇] 현재 잔고: {format_krw(self._starting_balance)}")
         logger.info(f"현재 총 잔고: {format_krw(self._starting_balance)}")
 
