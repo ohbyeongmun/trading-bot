@@ -156,6 +156,49 @@ class OrderManager:
 
         return result
 
+    def execute_partial_sell(self, ticker: str, ratio: float,
+                             reason: str = "", strategy: str = "") -> Optional[dict]:
+        """보유량의 일정 비율만 매도. ratio: 0.0~1.0."""
+        total_volume = self.client.get_balance(ticker)
+        if total_volume <= 0:
+            return None
+
+        sell_volume = total_volume * ratio
+        if sell_volume <= 0:
+            return None
+
+        current_price = self.client.get_current_price(ticker)
+        if not current_price:
+            return None
+
+        sell_amount = sell_volume * current_price
+        if sell_amount < 5000:
+            return None
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] 분할매도: {ticker} | {ratio:.0%} | {sell_amount:,.0f}원 | {reason}")
+            self.db.record_trade(ticker, "sell", sell_amount, sell_volume, current_price,
+                                 strategy, 0, reason, sell_amount * UPBIT_FEE_RATE)
+            return {"dry_run": True, "ticker": ticker, "amount": sell_amount, "partial": ratio}
+
+        result = self.client.sell_market(ticker, sell_volume)
+        if not result or "error" in result:
+            logger.error(f"분할매도 실패: {ticker} | {result}")
+            return None
+
+        order_uuid = result.get("uuid", "")
+        sell_price = self._wait_for_fill(order_uuid, ticker) or current_price
+        fee = sell_amount * UPBIT_FEE_RATE
+
+        self.db.record_trade(ticker, "sell", sell_amount, sell_volume, sell_price,
+                             strategy, 0, f"분할({ratio:.0%}) {reason}", fee, order_uuid)
+
+        logger.info(f"분할매도 완료: {ticker} | {ratio:.0%} | {sell_price:,.0f}원 | {reason}")
+        if self.notifier:
+            self.notifier.send_trade_sync(f"분할매도 | {ticker} | {ratio:.0%} | {sell_amount:,.0f}원 | {reason}")
+
+        return result
+
     def sell_all_positions(self, reason: str = "전량 매도"):
         """모든 오픈 포지션 매도."""
         positions = self.db.get_open_positions()

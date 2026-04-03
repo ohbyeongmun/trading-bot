@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from api.auth import get_api_key
 from api.event_bus import event_bus
-from api.routes import dashboard, trades, positions, strategies, daily_reports, bot_control
+from api.routes import dashboard, trades, positions, strategies, daily_reports, bot_control, charts
 from api.websocket_handler import router as ws_router
 
 from bot.core.config import load_config
@@ -86,6 +86,7 @@ app.include_router(positions.router)
 app.include_router(strategies.router)
 app.include_router(daily_reports.router)
 app.include_router(bot_control.router)
+app.include_router(charts.router)
 app.include_router(ws_router)
 
 

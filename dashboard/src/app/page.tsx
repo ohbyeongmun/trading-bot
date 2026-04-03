@@ -11,6 +11,9 @@ import { PortfolioPie } from "@/components/dashboard/PortfolioPie";
 import { WinLossChart } from "@/components/dashboard/WinLossChart";
 import { DailyActivity } from "@/components/dashboard/DailyActivity";
 import { TradeScatter } from "@/components/dashboard/TradeScatter";
+import { CandleChart } from "@/components/dashboard/CandleChart";
+import { BotControl } from "@/components/dashboard/BotControl";
+import { useToast, ToastContainer } from "@/components/common/Toast";
 
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
@@ -18,6 +21,7 @@ export default function DashboardPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [reports, setReports] = useState<DailyReport[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const { toasts, addToast } = useToast();
 
   const fetchAll = useCallback(async () => {
     try {
@@ -43,9 +47,18 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [fetchAll]);
 
-  const handleEvent = useCallback(() => {
+  const handleEvent = useCallback((event: any) => {
     fetchAll();
-  }, [fetchAll]);
+    if (event?.type === "trade_executed" && event?.data) {
+      const d = event.data;
+      const type = d.side === "buy" ? "buy" : d.reason?.includes("손절") ? "stop" : "sell";
+      addToast(type, `${d.side === "buy" ? "매수" : "매도"} ${d.ticker} ${d.amount_krw?.toLocaleString()}원`);
+    }
+    if (event?.type === "position_closed" && event?.data) {
+      const d = event.data;
+      addToast(d.pnl >= 0 ? "buy" : "stop", `${d.ticker} 포지션 종료 ${d.pnl_pct?.toFixed(1)}%`);
+    }
+  }, [fetchAll, addToast]);
 
   const { connected } = useWebSocket(handleEvent);
 
@@ -76,6 +89,8 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      <ToastContainer toasts={toasts} />
+
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">대시보드</h2>
         <div className="flex items-center gap-2">
@@ -89,7 +104,15 @@ export default function DashboardPage() {
       {/* Row 1: 자산 요약 */}
       <BalanceCard data={dashboard} />
 
-      {/* Row 2: 누적 손익 + 포트폴리오 + 승패 */}
+      {/* Row 2: 캔들차트 + 봇 제어 */}
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <div className="lg:col-span-3">
+          <CandleChart positions={positions} />
+        </div>
+        <BotControl data={dashboard} onRefresh={fetchAll} />
+      </div>
+
+      {/* Row 3: 누적 손익 + 포트폴리오 + 승패 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <PnlChart reports={reports} trades={trades} />
@@ -100,13 +123,13 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Row 3: 거래 분포 + 일별 활동 */}
+      {/* Row 4: 거래 분포 + 일별 활동 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <TradeScatter trades={trades} />
         <DailyActivity trades={trades} />
       </div>
 
-      {/* Row 4: 포지션 + 최근 거래 */}
+      {/* Row 5: 포지션 + 최근 거래 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <PositionsTable positions={positions} />
         <RecentTrades trades={trades} />
