@@ -20,7 +20,7 @@ export default function DashboardPage() {
       const [d, p, t, r] = await Promise.all([
         api.dashboard(),
         api.positions(),
-        api.trades(20),
+        api.trades(200),
         api.dailyReports(30),
       ]);
       setDashboard(d);
@@ -85,7 +85,7 @@ export default function DashboardPage() {
 
       <BalanceCard data={dashboard} />
 
-      <PnlChart reports={reports} />
+      <PnlChart reports={reports} trades={trades} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <PositionsTable positions={positions} />
