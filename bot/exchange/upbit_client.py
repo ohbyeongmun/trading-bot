@@ -57,7 +57,10 @@ class UpbitClient:
                     continue
                 return result
             except Exception as e:
-                logger.error(f"API 오류 (시도 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 2:
+                    logger.debug(f"API 재시도 {attempt + 1}/{max_retries}: {e}")
+                else:
+                    logger.warning(f"API 오류 (최종 시도 {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(1 * (attempt + 1))
                 else:
@@ -97,21 +100,28 @@ class UpbitClient:
             return None
 
     def get_current_prices(self, tickers: list[str]) -> dict[str, float]:
-        prices = {}
+        """여러 코인 가격을 한번에 조회. pyupbit 배치 API 사용."""
         if not tickers:
-            return prices
+            return {}
 
-        # pyupbit.get_current_price에 리스트 전체를 넘기면 하나의 잘못된 코드 때문에 전체 실패함.
-        # 따라서 개별 호출로 분리하고, 실패하는 티커는 건너뜀.
+        try:
+            # pyupbit에 리스트를 넘기면 dict로 반환
+            self._rate_limit()
+            result = pyupbit.get_current_price(tickers)
+            if isinstance(result, dict):
+                return {k: float(v) for k, v in result.items() if v}
+        except Exception as e:
+            logger.debug(f"배치 가격 조회 실패, 개별 조회로 전환: {e}")
+
+        # 배치 실패 시 개별 조회 (폴백)
+        prices = {}
         for ticker in tickers:
             try:
-                current_price = self.get_current_price(ticker)
-                if current_price is not None:
-                    prices[ticker] = current_price
-                else:
-                    logger.warning(f"가격 없음: {ticker}, 생략")
-            except Exception as e:
-                logger.warning(f"유효하지 않은 티커 또는 API 오류: {ticker}, 건너뜁니다 ({e})")
+                price = self.get_current_price(ticker)
+                if price:
+                    prices[ticker] = price
+            except Exception:
+                continue
         return prices
 
     def get_ohlcv(
