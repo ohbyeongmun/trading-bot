@@ -436,7 +436,16 @@ class TradingEngine:
                     print(f"  [시간] {pos.ticker} {change_pct:.2f}%", flush=True)
                     continue
 
-            # [3] 최종 익절: ATR 기반 동적 익절 또는 +10% 하드 익절
+            # [3] 분할 매도: +4.5%에서 50% 매도 (DB에 기록)
+            if change_pct >= 4.5 and not pos.partial_sold:
+                reason = f"분할익절 +{change_pct:.2f}% (4.5% 도달, 50% 매도)"
+                self.order_manager.execute_partial_sell(pos.ticker, 0.5, reason, pos.strategy)
+                self.db.mark_partial_sold(pos.id)
+                sold = True
+                print(f"  [분할] {pos.ticker} +{change_pct:.2f}% (50% 매도)", flush=True)
+                # continue 안 함 — 다음 조건도 체크
+
+            # [4] 최종 익절: ATR 기반 동적 익절 또는 +10% 하드 익절
             if change_pct >= dynamic_take or change_pct >= 10.0:
                 reason = f"동적익절 +{change_pct:.2f}% (ATR기반 +{dynamic_take:.1f}%)"
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)

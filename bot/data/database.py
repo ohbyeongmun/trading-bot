@@ -93,6 +93,12 @@ class Database:
             pos.highest_price = price
             self._session.commit()
 
+    def mark_partial_sold(self, position_id: int):
+        pos = self._session.query(Position).filter_by(id=position_id).first()
+        if pos:
+            pos.partial_sold = True
+            self._session.commit()
+
     def get_open_positions(self) -> list[Position]:
         return self._session.query(Position).filter_by(status="open").all()
 

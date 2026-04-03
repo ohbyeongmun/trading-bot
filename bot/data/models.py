@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, create_engine
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -39,6 +39,7 @@ class Position(Base):
     exit_time = Column(DateTime, nullable=True)
     pnl = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
+    partial_sold = Column(Boolean, default=False)
 
 
 class DailyReport(Base):
@@ -58,6 +59,15 @@ class DailyReport(Base):
 
 
 def create_db_engine(db_path: str = "data/trading_bot.db"):
+    import sqlite3
+    # 기존 DB 마이그레이션: 새 컬럼 추가 (없으면 추가, 있으면 무시)
+    try:
+        db = sqlite3.connect(db_path)
+        db.execute("ALTER TABLE positions ADD COLUMN partial_sold BOOLEAN DEFAULT 0")
+        db.commit()
+        db.close()
+    except Exception:
+        pass
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     Base.metadata.create_all(engine)
     return engine
