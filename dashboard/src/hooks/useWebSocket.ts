@@ -15,7 +15,9 @@ export function useWebSocket(onEvent?: (event: WSEvent) => void) {
 
   const connect = useCallback(() => {
     const apiKey = process.env.NEXT_PUBLIC_API_KEY || "";
-    const wsUrl = `ws://localhost:8000/ws/live?key=${apiKey}`;
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const wsBase = baseUrl.replace(/^http/, "ws");
+    const wsUrl = `${wsBase}/ws/live?key=${apiKey}`;
 
     try {
       const ws = new WebSocket(wsUrl);

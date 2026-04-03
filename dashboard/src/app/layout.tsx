@@ -11,17 +11,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ko">
       <body className="min-h-screen">
-        <div className="flex">
-          {/* Sidebar */}
-          <nav className="w-56 min-h-screen bg-[var(--bg-secondary)] border-r border-gray-800 p-4 flex flex-col gap-1">
-            <h1 className="text-lg font-bold mb-6 px-3">Trading Bot</h1>
+        <div className="flex flex-col md:flex-row">
+          {/* Sidebar: 모바일에서는 상단 가로 바, 데스크톱에서는 좌측 세로 */}
+          <nav className="md:w-56 md:min-h-screen bg-[var(--bg-secondary)] border-b md:border-b-0 md:border-r border-gray-800 p-3 md:p-4 flex md:flex-col gap-1 overflow-x-auto">
+            <h1 className="text-lg font-bold md:mb-6 px-3 whitespace-nowrap">Trading Bot</h1>
             <NavLink href="/" label="대시보드" />
             <NavLink href="/trades" label="거래 내역" />
             <NavLink href="/strategies" label="전략 분석" />
           </nav>
 
           {/* Main */}
-          <main className="flex-1 p-6 overflow-auto">{children}</main>
+          <main className="flex-1 p-4 md:p-6 overflow-auto min-w-0">{children}</main>
         </div>
       </body>
     </html>
