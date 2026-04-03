@@ -45,30 +45,7 @@ class RiskManager:
             self._daily_loss += abs(loss_amount)
 
     def can_trade(self, current_balance: float) -> tuple[bool, str]:
-        """새 매수 가능 여부 확인. 기존 포지션 관리(매도/손절)는 항상 가능."""
-        # 일일 손실 한도 확인 (로그만, 중단 안 함)
-        daily_loss_pct = self._daily_loss / self.initial_capital if self.initial_capital > 0 else 0
-        if daily_loss_pct >= self.config.daily_loss_limit_pct:
-            msg = f"일일 손실 한도 근접 ({daily_loss_pct:.2%}) — 새 매수 제한"
-            logger.warning(msg)
-            return False, msg
-
-        # 최대 낙폭 확인
-        if self.peak_balance > 0:
-            drawdown = (self.peak_balance - current_balance) / self.peak_balance
-            if drawdown >= self.config.max_drawdown_pct:
-                msg = f"세션 낙폭 {drawdown:.2%} — 새 매수 제한"
-                logger.warning(msg)
-                return False, msg
-
-        # Circuit breaker: 48시간 윈도우 내 5% 이상 낙폭 시 거래 완전 중단
-        if self._check_circuit_breaker(current_balance):
-            cb_pct = getattr(self.config, 'circuit_breaker_pct', 0.05)
-            cb_hours = getattr(self.config, 'circuit_breaker_hours', 48)
-            msg = f"Circuit breaker 발동: {cb_hours}h 내 {cb_pct:.0%} 이상 낙폭"
-            logger.critical(msg)
-            return False, msg
-
+        """항상 거래 가능. 잔고 기반 제한 없음."""
         return True, "거래 가능"
 
     def _check_circuit_breaker(self, current_balance: float) -> bool:
