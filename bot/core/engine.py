@@ -436,17 +436,8 @@ class TradingEngine:
                     print(f"  [시간] {pos.ticker} {change_pct:.2f}%", flush=True)
                     continue
 
-            # [3] 분할 매도: 중간 익절 라인 도달 시 50% 매도
-            if change_pct >= partial_take and not getattr(pos, '_partial_sold', False):
-                reason = f"분할익절 +{change_pct:.2f}% (1차 {partial_take:.1f}%)"
-                self.order_manager.execute_partial_sell(pos.ticker, 0.5, reason, pos.strategy)
-                pos._partial_sold = True
-                sold = True
-                print(f"  [분할] {pos.ticker} +{change_pct:.2f}% (50% 매도)", flush=True)
-                continue
-
-            # [4] 최종 익절: ATR 기반 동적 익절
-            if change_pct >= dynamic_take:
+            # [3] 최종 익절: ATR 기반 동적 익절 또는 +10% 하드 익절
+            if change_pct >= dynamic_take or change_pct >= 10.0:
                 reason = f"동적익절 +{change_pct:.2f}% (ATR기반 +{dynamic_take:.1f}%)"
                 self.order_manager.execute_sell(pos.ticker, reason, pos.strategy)
                 sold = True
