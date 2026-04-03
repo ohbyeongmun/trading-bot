@@ -21,46 +21,43 @@ async def websocket_live(websocket: WebSocket, key: str = Query(None)):
     await websocket.accept()
     queue = event_bus.subscribe()
 
-    try:
-        # heartbeat + 이벤트 수신을 동시에 처리
-        heartbeat_task = asyncio.create_task(_heartbeat(websocket))
-        event_task = asyncio.create_task(_send_events(websocket, queue))
-
-        # 클라이언트 메시지 수신 (ping/pong, 연결 유지)
+    async def send_loop():
+        """이벤트 큐 + heartbeat을 클라이언트에 전송."""
+        heartbeat_counter = 0
         while True:
             try:
-                data = await asyncio.wait_for(
-                    websocket.receive_text(), timeout=HEARTBEAT_INTERVAL * 2
-                )
-                # 클라이언트 ping에 pong 응답
+                # 이벤트가 있으면 전송, 없으면 heartbeat 간격만큼 대기
+                event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL)
+                await websocket.send_text(json.dumps(event, default=str))
+            except asyncio.TimeoutError:
+                # 이벤트 없으면 heartbeat 전송
+                try:
+                    await websocket.send_text(json.dumps({"type": "heartbeat"}))
+                except Exception:
+                    break
+
+    async def recv_loop():
+        """클라이언트 메시지 수신 (ping 응답, 연결 유지 확인)."""
+        while True:
+            try:
+                data = await websocket.receive_text()
                 if data == "ping":
                     await websocket.send_text("pong")
-            except asyncio.TimeoutError:
-                # 클라이언트가 응답 없으면 연결 종료
+            except WebSocketDisconnect:
                 break
-    except WebSocketDisconnect:
+            except Exception:
+                break
+
+    try:
+        # 송신/수신을 병렬 실행, 하나라도 끝나면 둘 다 종료
+        send_task = asyncio.create_task(send_loop())
+        recv_task = asyncio.create_task(recv_loop())
+        done, pending = await asyncio.wait(
+            [send_task, recv_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    except Exception:
         pass
     finally:
-        heartbeat_task.cancel()
-        event_task.cancel()
         event_bus.unsubscribe(queue)
-
-
-async def _heartbeat(websocket: WebSocket):
-    """서버 → 클라이언트 heartbeat ping."""
-    try:
-        while True:
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
-            await websocket.send_text(json.dumps({"type": "heartbeat"}))
-    except Exception:
-        pass
-
-
-async def _send_events(websocket: WebSocket, queue: asyncio.Queue):
-    """이벤트 큐에서 이벤트를 꺼내 클라이언트에 전송."""
-    try:
-        while True:
-            event = await queue.get()
-            await websocket.send_text(json.dumps(event, default=str))
-    except Exception:
-        pass
