@@ -14,7 +14,9 @@ class RiskManager:
         self.config = config
         self.db = db
         self.initial_capital = initial_capital
-        self.peak_balance = max(initial_capital, db.get_peak_balance() or initial_capital)
+        # peak_balance를 현재 자본금으로 초기화 (과거 최고 잔고가 아닌 이번 세션 기준)
+        # 과거 DB 최고값을 쓰면 잔고가 줄었을 때 영원히 PAUSED됨
+        self.peak_balance = initial_capital
         self._daily_loss = 0.0
         self._trading_paused = False
         self._pause_time = None
