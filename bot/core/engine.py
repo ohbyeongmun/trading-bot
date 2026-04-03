@@ -80,6 +80,8 @@ class TradingEngine:
             "stop_loss_mult": 1.0,
             "take_profit_mult": 1.0,
         }
+        # 스캐너용 캐시: _check_entries()가 분석할 때마다 갱신
+        self._last_scan_results: list[dict] = []
 
     def _init_strategies(self) -> dict:
         cfg = self.config
@@ -491,11 +493,11 @@ class TradingEngine:
             return
 
         held_tickers = {p.ticker for p in open_positions}
+        held_positions = {p.ticker: p for p in open_positions}
         buy_candidates = []
+        scan_results = []
 
         for ticker in self.target_coins:
-            if ticker in held_tickers:
-                continue
 
             try:
                 # 각 전략별 preferred_interval로 OHLCV 가져오기
@@ -552,28 +554,45 @@ class TradingEngine:
                 boosted_confidence = min(ensemble_result.confidence + volume_boost, 1.0)
                 spike_tag = " [VOL SPIKE]" if volume_spike else ""
 
-                if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
-                    buy_candidates.append({
-                        "ticker": ticker,
-                        "signal": ensemble_result.signal,
-                        "confidence": boosted_confidence,
-                        "reason": ensemble_result.reason + spike_tag,
-                        "score": ensemble_result.metadata.get("weighted_score", 0),
-                    })
+                # 매수 후보 추가 (보유 중이 아닌 코인만)
+                if ticker not in held_tickers:
+                    if ensemble_result.signal in (Signal.BUY, Signal.STRONG_BUY):
+                        buy_candidates.append({
+                            "ticker": ticker,
+                            "signal": ensemble_result.signal,
+                            "confidence": boosted_confidence,
+                            "reason": ensemble_result.reason + spike_tag,
+                            "score": ensemble_result.metadata.get("weighted_score", 0),
+                        })
+                    elif volume_spike and ensemble_result.signal == Signal.NEUTRAL:
+                        buy_candidates.append({
+                            "ticker": ticker,
+                            "signal": Signal.BUY,
+                            "confidence": volume_boost,
+                            "reason": f"거래량 급등 매수 (신호 NEUTRAL이나 거래량 3x+){spike_tag}",
+                            "score": 0,
+                        })
 
-                # 거래량 급등이면 NEUTRAL이어도 약한 매수 후보로 포함
-                elif volume_spike and ensemble_result.signal == Signal.NEUTRAL:
-                    buy_candidates.append({
-                        "ticker": ticker,
-                        "signal": Signal.BUY,
-                        "confidence": volume_boost,
-                        "reason": f"거래량 급등 매수 (신호 NEUTRAL이나 거래량 3x+){spike_tag}",
-                        "score": 0,
-                    })
+                # 스캐너 캐시에 결과 저장 (보유 여부 무관하게 모든 코인)
+                pos = held_positions.get(ticker)
+                scan_results.append({
+                    "ticker": ticker,
+                    "coin": ticker.replace("KRW-", ""),
+                    "price": current_price,
+                    "signal": ensemble_result.signal.name,
+                    "confidence": round(boosted_confidence, 3),
+                    "score": round(ensemble_result.metadata.get("weighted_score", 0), 3),
+                    "volume_spike": volume_spike,
+                    "held": pos is not None,
+                    "pnl_pct": round((current_price / pos.entry_price - 1) * 100, 2) if pos and current_price else None,
+                })
 
             except Exception as e:
                 logger.debug(f"앙상블 분석 오류 {ticker}: {e}")
                 continue
+
+        # 스캐너 캐시 갱신
+        self._last_scan_results = scan_results
 
         # 신뢰도 높은 순 정렬
         buy_candidates.sort(key=lambda x: x["confidence"], reverse=True)
